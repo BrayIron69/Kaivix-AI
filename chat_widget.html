@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kaivix Labs — Chat Widget Demo</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Arial',sans-serif;background:#050505;color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;}
+.demo-label{position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#111;border:1px solid #222;padding:8px 20px;border-radius:100px;font-size:12px;color:#666;letter-spacing:1px;}
+
+/* ── Widget Button ── */
+#kvx-btn{
+  position:fixed;bottom:24px;right:24px;
+  width:56px;height:56px;border-radius:50%;
+  background:#fff;border:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 24px rgba(0,0,0,.5);
+  transition:transform .2s,box-shadow .2s;z-index:9999;
+}
+#kvx-btn:hover{transform:scale(1.08);box-shadow:0 6px 32px rgba(0,0,0,.6);}
+#kvx-btn svg{width:24px;height:24px;}
+
+/* ── Chat Window ── */
+#kvx-window{
+  position:fixed;bottom:92px;right:24px;
+  width:360px;max-width:calc(100vw - 32px);
+  background:#0d0d0d;border:1px solid #1c1c1c;
+  border-radius:16px;overflow:hidden;
+  box-shadow:0 16px 64px rgba(0,0,0,.8);
+  display:none;flex-direction:column;
+  height:520px;z-index:9998;
+}
+#kvx-window.open{display:flex;}
+
+#kvx-header{
+  padding:16px 18px;background:#111;
+  border-bottom:1px solid #1c1c1c;
+  display:flex;align-items:center;justify-content:space-between;
+}
+.kvx-agent{display:flex;align-items:center;gap:10px;}
+.kvx-avatar{
+  width:34px;height:34px;border-radius:50%;
+  background:#222;border:1px solid #333;
+  display:flex;align-items:center;justify-content:center;
+  font-size:14px;font-weight:700;color:#fff;
+}
+.kvx-name{font-size:14px;font-weight:600;}
+.kvx-status{font-size:11px;color:#4ade80;margin-top:1px;}
+#kvx-close{background:none;border:none;color:#555;cursor:pointer;font-size:20px;line-height:1;padding:4px;}
+#kvx-close:hover{color:#fff;}
+
+#kvx-messages{
+  flex:1;overflow-y:auto;padding:16px;
+  display:flex;flex-direction:column;gap:10px;
+  scroll-behavior:smooth;
+}
+#kvx-messages::-webkit-scrollbar{width:4px;}
+#kvx-messages::-webkit-scrollbar-track{background:#0d0d0d;}
+#kvx-messages::-webkit-scrollbar-thumb{background:#222;border-radius:4px;}
+
+.kvx-msg{max-width:82%;padding:10px 13px;border-radius:12px;font-size:13px;line-height:1.6;word-break:break-word;}
+.kvx-msg.agent{background:#1a1a1a;border:1px solid #222;color:#e0e0e0;align-self:flex-start;border-bottom-left-radius:3px;}
+.kvx-msg.user{background:#fff;color:#000;align-self:flex-end;border-bottom-right-radius:3px;}
+.kvx-typing{display:flex;gap:4px;padding:10px 13px;background:#1a1a1a;border:1px solid #222;border-radius:12px;border-bottom-left-radius:3px;align-self:flex-start;}
+.kvx-typing span{width:6px;height:6px;background:#555;border-radius:50%;animation:bounce .9s infinite;}
+.kvx-typing span:nth-child(2){animation-delay:.15s;}
+.kvx-typing span:nth-child(3){animation-delay:.3s;}
+@keyframes bounce{0%,80%,100%{transform:translateY(0);}40%{transform:translateY(-5px);}}
+
+#kvx-footer{padding:12px;border-top:1px solid #1c1c1c;background:#111;}
+.kvx-input-row{display:flex;gap:8px;}
+#kvx-input{
+  flex:1;background:#1a1a1a;border:1px solid #2a2a2a;
+  color:#fff;border-radius:8px;padding:10px 13px;
+  font-size:13px;outline:none;resize:none;
+  font-family:inherit;line-height:1.4;
+  transition:border-color .2s;
+}
+#kvx-input:focus{border-color:#444;}
+#kvx-input::placeholder{color:#444;}
+#kvx-send{
+  width:38px;height:38px;border-radius:8px;
+  background:#fff;border:none;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;transition:background .2s;
+  align-self:flex-end;
+}
+#kvx-send:hover{background:#e0e0e0;}
+#kvx-send:disabled{background:#222;cursor:not-allowed;}
+#kvx-send svg{width:16px;height:16px;}
+.kvx-branding{text-align:center;font-size:10px;color:#333;margin-top:8px;letter-spacing:0.5px;}
+</style>
+</head>
+<body>
+
+<div class="demo-label">KAIVIX LABS — CHAT WIDGET DEMO</div>
+
+<!-- Toggle Button -->
+<button id="kvx-btn" aria-label="Chat with Kaivix Labs">
+  <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+  </svg>
+</button>
+
+<!-- Chat Window -->
+<div id="kvx-window">
+  <div id="kvx-header">
+    <div class="kvx-agent">
+      <div class="kvx-avatar">A</div>
+      <div>
+        <div class="kvx-name">Alex — Kaivix Labs</div>
+        <div class="kvx-status">● Online now</div>
+      </div>
+    </div>
+    <button id="kvx-close">×</button>
+  </div>
+
+  <div id="kvx-messages"></div>
+
+  <div id="kvx-footer">
+    <div class="kvx-input-row">
+      <textarea id="kvx-input" placeholder="Type a message..." rows="1"></textarea>
+      <button id="kvx-send" aria-label="Send">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </div>
+    <div class="kvx-branding">Powered by Kaivix Labs AI</div>
+  </div>
+</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────
+const API_URL = 'http://localhost:8000/chat'; // Change to Railway URL when deployed
+const SESSION_ID = 'session_' + Math.random().toString(36).slice(2);
+
+// ── State ─────────────────────────────────────────────────────
+let isOpen = false;
+let isLoading = false;
+let initialized = false;
+
+// ── Elements ──────────────────────────────────────────────────
+const btn     = document.getElementById('kvx-btn');
+const window_ = document.getElementById('kvx-window');
+const closeBtn= document.getElementById('kvx-close');
+const messages= document.getElementById('kvx-messages');
+const input   = document.getElementById('kvx-input');
+const send    = document.getElementById('kvx-send');
+
+// ── Toggle ────────────────────────────────────────────────────
+btn.addEventListener('click', () => toggle(true));
+closeBtn.addEventListener('click', () => toggle(false));
+
+function toggle(open) {
+  isOpen = open;
+  window_.classList.toggle('open', open);
+  btn.style.display = open ? 'none' : 'flex';
+  if (open && !initialized) {
+    initialized = true;
+    sendMessage('Hey, just landed on your website', true);
+  }
+  if (open) input.focus();
+}
+
+// ── Send ──────────────────────────────────────────────────────
+send.addEventListener('click', handleSend);
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
+});
+
+// Auto-resize textarea
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 100) + 'px';
+});
+
+function handleSend() {
+  const text = input.value.trim();
+  if (!text || isLoading) return;
+  input.value = '';
+  input.style.height = 'auto';
+  addMessage(text, 'user');
+  sendMessage(text, false);
+}
+
+async function sendMessage(text, isOpening) {
+  if (!isOpening) setLoading(true);
+
+  const typing = showTyping();
+
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversation_id: SESSION_ID,
+        message: text,
+      }),
+    });
+
+    const data = await res.json();
+    removeTyping(typing);
+
+    if (data.response) {
+      addMessage(data.response, 'agent');
+    } else {
+      addMessage("Sorry, I didn't catch that. Could you say that again?", 'agent');
+    }
+  } catch (err) {
+    removeTyping(typing);
+    addMessage("I'm having trouble connecting right now. Please try again in a moment.", 'agent');
+    console.error('Chat error:', err);
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── UI Helpers ────────────────────────────────────────────────
+function addMessage(text, role) {
+  const el = document.createElement('div');
+  el.className = `kvx-msg ${role}`;
+  el.textContent = text;
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function showTyping() {
+  const el = document.createElement('div');
+  el.className = 'kvx-typing';
+  el.innerHTML = '<span></span><span></span><span></span>';
+  messages.appendChild(el);
+  messages.scrollTop = messages.scrollHeight;
+  return el;
+}
+
+function removeTyping(el) {
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+function setLoading(state) {
+  isLoading = state;
+  send.disabled = state;
+  input.disabled = state;
+}
+
+// Auto-open after 3 seconds
+setTimeout(() => {
+  if (!isOpen) toggle(true);
+}, 3000);
+</script>
+</body>
+</html>
