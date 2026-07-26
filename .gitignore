@@ -8,6 +8,9 @@ __pycache__/
 # Databases
 *.db
 
+# Google Calendar OAuth verification token (real access/refresh token)
+scripts/.verify_token.json
+
 # Logs
 logs/
 *.log
