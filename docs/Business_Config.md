@@ -176,7 +176,7 @@ formality: "casual-professional"
 
 signature\_phrases: \[]
 
-booking\_link: "https://calendly.com/hasnatulahad2/30min"
+booking\_link: "https://calendly.com/brayiron-kaivixlab/30min"
 
 identity\_statement: >
 

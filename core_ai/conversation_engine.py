@@ -75,7 +75,7 @@ class ConversationEngine:
         self.business_id = business_id
         self.business_config = business_config_repository.load(business_id)
 
-        self.memory = ConversationMemory()
+        self.memory = ConversationMemory(business_id=self.business_id)
         self.knowledge = KnowledgeBase(business_config=self.business_config)
         self.llm = LLM()
         self.logger = Logger()

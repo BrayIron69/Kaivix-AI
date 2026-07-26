@@ -41,7 +41,7 @@ Your job is to:
 3. Handle objections confidently without being pushy
 4. Guide them toward booking a free 30-minute demo call
 
-Calendly demo link: https://calendly.com/hasnatulahad2/30min
+Calendly demo link: https://calendly.com/brayiron-kaivixlab/30min
 """.strip()
 
     # Universal engine rules — apply to every business, not config-driven.

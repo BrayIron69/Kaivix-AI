@@ -1,36 +1,35 @@
-from collections import defaultdict
+from core_ai.business_config import DEFAULT_BUSINESS_ID
+from memory.conversation_store import BaseConversationStore, SQLiteConversationStore
 
 
 class ConversationMemory:
     """
-    Simple in-memory conversation storage.
+    Per-business conversation storage.
 
-    This is the first implementation. Later it can be replaced
-    with Redis, SQLite, or another persistent memory backend
-    without changing the ConversationEngine.
+    Persistence is fully delegated to a BaseConversationStore (SQLite
+    by default, see memory/conversation_store.py) — no SQL or file I/O
+    lives in this class or in ConversationEngine, only in the store
+    implementation. No caching layer: every call reads fresh from the
+    store, matching how CRM and LongTermMemory already work (simplicity
+    over premature optimization at this scale).
     """
 
-    def __init__(self):
-        self._conversations = defaultdict(list)
+    def __init__(
+        self,
+        business_id: str = DEFAULT_BUSINESS_ID,
+        store: BaseConversationStore | None = None,
+    ):
+        self.business_id = business_id
+        self.store = store or SQLiteConversationStore()
 
     def add_user_message(self, conversation_id: str, message: str):
-        self._conversations[conversation_id].append(
-            {
-                "role": "user",
-                "content": message,
-            }
-        )
+        self.store.add_message(self.business_id, conversation_id, "user", message)
 
     def add_assistant_message(self, conversation_id: str, message: str):
-        self._conversations[conversation_id].append(
-            {
-                "role": "assistant",
-                "content": message,
-            }
-        )
+        self.store.add_message(self.business_id, conversation_id, "assistant", message)
 
     def get_conversation(self, conversation_id: str):
-        return self._conversations.get(conversation_id, []).copy()
+        return self.store.get_messages(self.business_id, conversation_id)
 
     def clear(self, conversation_id: str):
-        self._conversations.pop(conversation_id, None)
+        self.store.clear(self.business_id, conversation_id)
