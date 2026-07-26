@@ -1,0 +1,13 @@
+business_id: kaivix
+business_name: "Kaivix Labs"
+industry: "AI Automation Agency"
+description: >
+  Kaivix Labs builds custom AI employees for US businesses — intelligent
+  agents that handle customer support, lead qualification, scheduling,
+  and workflow automation 24/7 without salaries, sick days, or turnover.
+contact:
+  email: brayiron@kaivixlab.com
+  phone: null
+  whatsapp: "+923424287544"
+timezone: "Asia/Karachi"
+locale: "en-US"

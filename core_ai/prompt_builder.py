@@ -1,3 +1,17 @@
+from typing import Optional
+
+from core_ai.business_config import (
+    BusinessConfig,
+    BusinessConfigRepository,
+    DEFAULT_BUSINESS_ID,
+)
+
+# Shared, process-lifetime repository for the default (Kaivix) BusinessConfig
+# used by build() whenever a caller doesn't pass one explicitly. Reused
+# across calls so the config is read from disk once, not every turn.
+_default_business_config_repository = BusinessConfigRepository()
+
+
 class PromptBuilder:
     """
     Builds the system prompt for the AI.
@@ -7,6 +21,12 @@ class PromptBuilder:
     and known customer state.
     """
 
+    # Historical reference constant — the original hardcoded identity
+    # block. No longer used by build() (which now reads
+    # business_config.persona.identity_statement, a lossless extraction
+    # of this exact text — see config/businesses/kaivix/persona.yaml),
+    # kept for backward-compatible reference (e.g. tests/test_business_config.py's
+    # equivalence check).
     AGENT_IDENTITY = """
 You are Bray, a friendly and confident sales agent for Kaivix Labs.
 You are NOT a bot. You are a real human sales rep having a genuine business conversation.
@@ -24,11 +44,14 @@ Your job is to:
 Calendly demo link: https://calendly.com/hasnatulahad2/30min
 """.strip()
 
-    RULES = """
+    # Universal engine rules — apply to every business, not config-driven.
+    # Rule 3 is the one business-tunable knob (response length), filled in
+    # from business_config.persona.response_style.max_sentences at build time.
+    ENGINE_RULES = """
 RULES:
 1. Sound human and conversational — never robotic or scripted
 2. Ask only ONE question per message
-3. Keep responses under 4 sentences
+3. Keep responses under {max_sentences} sentences
 4. Answer their question first, then ask your question
 5. Never repeat a question the visitor already answered
 6. Never invent company information not in the knowledge base
@@ -49,6 +72,7 @@ RULES:
         plan=None,
         working_memory=None,
         long_term_memory=None,
+        business_config: Optional[BusinessConfig] = None,
     ) -> str:
         # `plan` (a ConversationPlan) carries the deterministic decisions
         # already made by PlanningEngine. `working_memory` carries the
@@ -68,6 +92,9 @@ RULES:
         if extracted_entities is None:
             extracted_entities = {}
 
+        if business_config is None:
+            business_config = _default_business_config_repository.load(DEFAULT_BUSINESS_ID)
+
         # Filter out empty entities for cleaner context
         clean_entities = {
             k: v for k, v in extracted_entities.items()
@@ -76,7 +103,7 @@ RULES:
         }
 
         sections = [
-            self.AGENT_IDENTITY,
+            business_config.persona.identity_statement,
             "",
             "=" * 50,
             f"CURRENT STAGE: {stage.upper()}",
@@ -174,7 +201,9 @@ RULES:
 
         sections += [
             "",
-            self.RULES,
+            self.ENGINE_RULES.format(
+                max_sentences=business_config.persona.response_style.max_sentences
+            ),
         ]
 
         return "\n".join(sections)

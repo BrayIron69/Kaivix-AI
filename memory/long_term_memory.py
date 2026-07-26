@@ -3,6 +3,19 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from core_ai.business_config import DEFAULT_BUSINESS_ID
+
+# Placeholder seam: real per-business resolution arrives when
+# ConversationEngine gains a business_id parameter (separate milestone).
+# Until then every call site here defaults to Kaivix's own business_id
+# (DEFAULT_BUSINESS_ID, imported above — single source of truth shared
+# with core_ai/business_config.py).
+
+
+def _make_key(business_id: str, email: str) -> str:
+    """Build the composite store key for a (business_id, email) pair."""
+    return f"{business_id}::{email}"
+
 
 class BaseLongTermMemoryStore(ABC):
     """
@@ -221,8 +234,9 @@ class LongTermMemory:
     LongTermMemory
 
     Dedicated component responsible for remembering a contact (keyed by
-    email) across multiple conversations. This is durable, cross-session
-    memory — distinct from both:
+    the composite of business_id + email, so two businesses' customers
+    sharing an email never collide) across multiple conversations. This
+    is durable, cross-session memory — distinct from both:
       - WorkingMemory, which represents only the current conversation
         and is discarded with it, and
       - ConversationSummary, which narrates only the current
@@ -274,11 +288,16 @@ class LongTermMemory:
     # Public API
     # ------------------------------------------------------------------
 
-    def recall(self, key: str) -> dict | None:
-        """Return the stored long-term profile for `key` (e.g. an email), or None."""
+    def recall(self, key: str, business_id: str = DEFAULT_BUSINESS_ID) -> dict | None:
+        """
+        Return the stored long-term profile for `key` (an email address),
+        scoped to `business_id`, or None. The store is looked up using the
+        composite (business_id, email) key so that two businesses'
+        customers sharing the same email never collide.
+        """
         if not key:
             return None
-        return self.store.get(key)
+        return self.store.get(_make_key(business_id, key))
 
     def apply_to_lead(self, profile: dict, lead) -> bool:
         """
@@ -317,32 +336,39 @@ class LongTermMemory:
 
         return changed
 
-    def hydrate(self, lead) -> dict | None:
+    def hydrate(self, lead, business_id: str = DEFAULT_BUSINESS_ID) -> dict | None:
         """
         Convenience combining recall() + apply_to_lead(): looks up a
-        long-term profile using `lead.email` and, if found, merges it
-        onto `lead` (only-fill-empty, only-add-new-items semantics —
-        see apply_to_lead). Returns the recalled profile (or None if no
-        record exists yet for this contact) so a caller can also use it
-        for display/prompt purposes without a second store read.
+        long-term profile using `lead.email` scoped to `business_id`
+        and, if found, merges it onto `lead` (only-fill-empty,
+        only-add-new-items semantics — see apply_to_lead). Returns the
+        recalled profile (or None if no record exists yet for this
+        contact) so a caller can also use it for display/prompt
+        purposes without a second store read.
         """
         email = getattr(lead, "email", "") or ""
         if not email:
             return None
 
-        profile = self.recall(email)
+        profile = self.recall(email, business_id=business_id)
         if profile:
             self.apply_to_lead(profile, lead)
         return profile
 
-    def remember(self, lead, conversation_id: str | None = None) -> bool:
+    def remember(
+        self,
+        lead,
+        conversation_id: str | None = None,
+        business_id: str = DEFAULT_BUSINESS_ID,
+    ) -> bool:
         """
         Persist durable fields from `lead` into long-term storage,
-        keyed by `lead.email`. Scalars are updated to the latest
-        non-empty value; list fields (pain_points, objections,
-        buying_signals) are accumulated across conversations rather
-        than overwritten, since the whole point of long-term memory is
-        not to lose what was learned in a previous session.
+        keyed by the composite (business_id, lead.email). Scalars are
+        updated to the latest non-empty value; list fields
+        (pain_points, objections, buying_signals) are accumulated
+        across conversations rather than overwritten, since the whole
+        point of long-term memory is not to lose what was learned in a
+        previous session.
 
         Returns True if a profile was written, False if `lead` has no
         email yet (nothing to key the memory on).
@@ -351,9 +377,10 @@ class LongTermMemory:
         if not email:
             return False
 
-        existing = self.store.get(email) or self._blank_profile(email)
+        store_key = _make_key(business_id, email)
+        existing = self.store.get(store_key) or self._blank_profile(store_key, email)
         merged = dict(existing)
-        merged["key"] = email
+        merged["key"] = store_key
         merged["email"] = email
 
         for field_name in self._SCALAR_LEAD_FIELDS:
@@ -382,7 +409,7 @@ class LongTermMemory:
         merged["products_of_interest"] = existing.get("products_of_interest") or []
         merged["preferences"] = existing.get("preferences") or []
 
-        self.store.save(email, merged)
+        self.store.save(store_key, merged)
         return True
 
     # ------------------------------------------------------------------
@@ -398,12 +425,12 @@ class LongTermMemory:
         return merged
 
     @staticmethod
-    def _blank_profile(key: str) -> dict:
+    def _blank_profile(key: str, email: str) -> dict:
         return {
             "key": key,
             "name": "",
             "company": "",
-            "email": key,
+            "email": email,
             "industry": "",
             "budget": "",
             "timeline": "",

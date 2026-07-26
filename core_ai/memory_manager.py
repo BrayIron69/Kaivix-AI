@@ -3,7 +3,7 @@ from __future__ import annotations
 from core_ai.conversation_summary import ConversationSummary
 from core_ai.lead_profile import LeadProfile
 from core_ai.working_memory import WorkingMemory
-from memory.long_term_memory import LongTermMemory
+from memory.long_term_memory import DEFAULT_BUSINESS_ID, LongTermMemory
 from utils.logger import Logger
 
 
@@ -170,14 +170,23 @@ class MemoryManager:
     # LongTermMemory
     # ------------------------------------------------------------------
 
-    def hydrate_long_term_memory(self, conversation_id: str, lead: LeadProfile) -> None:
+    def hydrate_long_term_memory(
+        self,
+        conversation_id: str,
+        lead: LeadProfile,
+        business_id: str = DEFAULT_BUSINESS_ID,
+    ) -> None:
         """
         Once per conversation, as soon as this contact's email is known,
-        look up any long-term memory on record for them and merge it
-        onto `lead` (only-fill-empty / only-add-new semantics — see
-        LongTermMemory.apply_to_lead). Runs at most once per
-        conversation; if no email is known yet, it is retried on the
-        next turn instead of being skipped permanently.
+        look up any long-term memory on record for them (scoped to
+        `business_id`) and merge it onto `lead` (only-fill-empty /
+        only-add-new semantics — see LongTermMemory.apply_to_lead). Runs
+        at most once per conversation; if no email is known yet, it is
+        retried on the next turn instead of being skipped permanently.
+
+        `business_id` defaults to Kaivix's own id — this is a
+        placeholder seam until ConversationEngine gains a real
+        business_id parameter in a later milestone.
 
         All persistence/lookup logic lives in LongTermMemory itself —
         this method only decides *when* to call it.
@@ -190,7 +199,7 @@ class MemoryManager:
             return
 
         try:
-            profile = self.long_term_memory.hydrate(lead)
+            profile = self.long_term_memory.hydrate(lead, business_id=business_id)
             if profile:
                 self._long_term_profiles[conversation_id] = profile
         except Exception as error:
@@ -201,18 +210,25 @@ class MemoryManager:
         finally:
             self._long_term_hydrated.add(conversation_id)
 
-    def persist_long_term_memory(self, conversation_id: str, lead: LeadProfile) -> None:
+    def persist_long_term_memory(
+        self,
+        conversation_id: str,
+        lead: LeadProfile,
+        business_id: str = DEFAULT_BUSINESS_ID,
+    ) -> None:
         """
-        Save durable fields from `lead` into long-term memory, once this
-        contact's email is known. Errors are logged but never interrupt
-        the conversation, matching every other persistence step in this
-        pipeline.
+        Save durable fields from `lead` into long-term memory, scoped to
+        `business_id`, once this contact's email is known. Errors are
+        logged but never interrupt the conversation, matching every
+        other persistence step in this pipeline.
         """
         if not lead.email or not lead.email.strip():
             return
 
         try:
-            self.long_term_memory.remember(lead, conversation_id=conversation_id)
+            self.long_term_memory.remember(
+                lead, conversation_id=conversation_id, business_id=business_id
+            )
         except Exception as error:
             self.logger.error(
                 f"[LongTermMemory] Failed to persist lead "

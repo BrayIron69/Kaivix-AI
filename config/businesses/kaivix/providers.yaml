@@ -1,0 +1,4 @@
+llm_provider: groq
+crm_provider: sqlite
+calendar_provider: none
+knowledge_provider: file

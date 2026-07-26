@@ -1,0 +1,16 @@
+fields:
+  - id: name
+    prompt_hint: "Ask for their name."
+    required: true
+  - id: email
+    prompt_hint: "Ask for an email address so we can follow up."
+    required: true
+  - id: company
+    prompt_hint: "Ask what company or business they represent."
+    required: true
+  - id: budget
+    prompt_hint: "Ask about their budget for this kind of solution."
+    required: true
+  - id: timeline
+    prompt_hint: "Ask about their timeline for getting started."
+    required: true

@@ -1,13 +1,26 @@
 from pathlib import Path
+from typing import Optional
 import re
+
+from core_ai.business_config import (
+    BusinessConfig,
+    BusinessConfigRepository,
+    DEFAULT_BUSINESS_ID,
+)
+
+# Shared, process-lifetime repository for the default (Kaivix) BusinessConfig
+# used whenever a caller doesn't pass one explicitly (same pattern as
+# core_ai/prompt_builder.py and core_ai/qualification_engine.py).
+_default_business_config_repository = BusinessConfigRepository()
 
 
 class KnowledgeBase:
     """
-    Loads and serves the company's knowledge.
+    Loads and serves a business's knowledge, namespaced by
+    business_config.knowledge.namespace (config/businesses/<id>/knowledge.yaml).
 
     Version 1:
-    - Loads all markdown files.
+    - Loads all markdown files from knowledge/<namespace>/.
     - Keeps them in memory.
     - Returns the most relevant document using simple keyword matching.
 
@@ -15,12 +28,16 @@ class KnowledgeBase:
     retrieval without changing the ConversationEngine.
     """
 
-    def __init__(self):
+    def __init__(self, business_config: Optional[BusinessConfig] = None):
+        if business_config is None:
+            business_config = _default_business_config_repository.load(DEFAULT_BUSINESS_ID)
+
+        self.business_config = business_config
         self.documents = {}
         self._load_documents()
 
     def _load_documents(self):
-        knowledge_dir = Path(__file__).parent
+        knowledge_dir = Path(__file__).parent / self.business_config.knowledge.namespace
 
         for file in knowledge_dir.glob("*.md"):
             try:
