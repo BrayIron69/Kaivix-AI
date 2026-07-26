@@ -1,3 +1,6 @@
+from typing import Optional
+
+from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from core_ai.lead_profile import LeadProfile
 from knowledge.knowledge_base import KnowledgeBase
 from utils.llm import LLM
@@ -56,9 +59,24 @@ class ConversationEngine:
     # check.
     _SUMMARY_REFRESH_INTERVAL_TURNS = 5
 
-    def __init__(self, summary_refresh_interval_turns: int = _SUMMARY_REFRESH_INTERVAL_TURNS):
+    def __init__(
+        self,
+        summary_refresh_interval_turns: int = _SUMMARY_REFRESH_INTERVAL_TURNS,
+        business_id: str = DEFAULT_BUSINESS_ID,
+        business_config_repository: Optional[BusinessConfigRepository] = None,
+    ):
+        # Resolved once, at construction, into a cached BusinessConfig —
+        # not threaded through process_message per-message. See
+        # docs/Decision_Log.md #011: ChatService holds one long-lived
+        # ConversationEngine instance and V1 is one deployment per
+        # customer, so business_id cannot legitimately vary between
+        # messages within a running process.
+        business_config_repository = business_config_repository or BusinessConfigRepository()
+        self.business_id = business_id
+        self.business_config = business_config_repository.load(business_id)
+
         self.memory = ConversationMemory()
-        self.knowledge = KnowledgeBase()
+        self.knowledge = KnowledgeBase(business_config=self.business_config)
         self.llm = LLM()
         self.logger = Logger()
 
@@ -67,7 +85,7 @@ class ConversationEngine:
         self.entity_extractor = EntityExtractor()
         self.lead_intelligence_engine = LeadIntelligenceEngine()
         self.planning_engine = PlanningEngine()
-        self.qualification_engine = QualificationEngine()
+        self.qualification_engine = QualificationEngine(business_config=self.business_config)
         self.prompt_builder = PromptBuilder()
         self.lead_service = LeadService()
 
@@ -171,6 +189,7 @@ class ConversationEngine:
             plan=plan,
             working_memory=working_memory,
             long_term_memory=long_term_profile,
+            business_config=self.business_config,
         )
 
         messages = self._build_messages(system_prompt, history)
@@ -231,13 +250,17 @@ class ConversationEngine:
         # Long-term memory hydration/persistence scheduling now lives on
         # MemoryManager; call sites and ordering relative to lead
         # intelligence / CRM sync below are unchanged.
-        self.memory_manager.hydrate_long_term_memory(conversation_id, lead)
+        self.memory_manager.hydrate_long_term_memory(
+            conversation_id, lead, business_id=self.business_id
+        )
 
         self._apply_lead_intelligence(conversation_id, lead)
 
         self._sync_lead_to_crm(conversation_id, lead)
 
-        self.memory_manager.persist_long_term_memory(conversation_id, lead)
+        self.memory_manager.persist_long_term_memory(
+            conversation_id, lead, business_id=self.business_id
+        )
 
         return lead
 
@@ -268,7 +291,7 @@ class ConversationEngine:
             return
 
         try:
-            self.lead_service.save(lead)
+            self.lead_service.save(lead, business_id=self.business_id)
         except Exception as error:
             self.logger.error(
                 f"[LeadService] Failed to save lead "
