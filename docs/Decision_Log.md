@@ -885,6 +885,82 @@ Before any database file was deleted and regenerated, the founder was explicitly
 
 ---
 
+# Decision #013
+
+## BusinessConfigRepository Fails Loudly When Its Own Default Reference Is Incomplete
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+`_get_default_sections()` falls back to Kaivix's own config files when another business's optional file is missing. If `config_root`'s Kaivix directory is itself missing a file, the code fell through to a bare `model_cls()` call — which throws an unhandled `pydantic.ValidationError` for any model with required fields (e.g. `BusinessPersona`), instead of the project's own established `BusinessConfigError` with a clear file/field-attributed message. Surfaced while building backlog item #6's cross-business test, where a temp `config_root` had no `kaivix/` directory at all.
+
+### Decision
+
+`_get_default_sections()` now raises a `BusinessConfigError` with a clear message when Kaivix's own reference directory can't supply a usable default for a given section, instead of letting a raw Pydantic exception escape.
+
+### Reasoning
+
+Consistent with the project's existing rule (Business_Config.md §6): malformed or unusable config should fail loudly with an attributed message, never silently or with an opaque stack trace. Kaivix's own config directory is the fallback backing every other business — if it's ever incomplete, that's a configuration problem worth a clear error, not a confusing crash three layers removed from the actual cause.
+
+### Consequences
+
+**Benefits**
+- Clear, actionable error instead of an opaque Pydantic stack trace
+- No change to the fallback *policy* itself — only to how failure is reported
+
+**Trade-offs**
+- None identified.
+
+---
+
+# Decision #014
+
+## Should a Business With No persona.yaml Really Inherit Bray's Identity?
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted — resolved: persona.yaml is now required per business (option b)
+
+### Context
+
+Per the original BusinessConfig spec, every optional section (including `persona`) falls back to Kaivix's own values when a business doesn't supply its own file. This makes sense for `qualification.yaml` (a generic starter field list is reasonably business-agnostic). It does not obviously make sense for `persona.yaml` — a business with no persona file would silently get "You are Bray, a friendly and confident sales agent for Kaivix Labs," which is a real, wrong identity, not a placeholder.
+
+### Decision
+
+Option (b): `persona.yaml` is now required per business, exactly like `identity.yaml` already was. `BusinessConfigRepository` no longer treats `persona.yaml` as optional — it fails loudly with a `BusinessConfigError` ("persona.yaml is required and was not found for business_id=...") if a business doesn't supply its own, instead of silently borrowing Kaivix's persona.
+
+### Reasoning
+
+Deliberately left open at #013's investigation time rather than fixed opportunistically — this was a product decision (how strict should onboarding be?) more than a code-correctness one. Option (b) was chosen over (a) and (c) because a business with no persona should never be able to run in production as "Bray from Kaivix Labs"; failing loudly at onboarding time is safer than either accepting the risk (a) or inventing a generic default persona no one asked for (c).
+
+### Consequences
+
+**Benefits**
+- A business can no longer silently run under Kaivix's own persona
+- Consistent with how `identity.yaml` is already handled — one rule for "required, business-specific" files instead of two
+- Onboarding failures now surface immediately and loudly, at config-load time, not as a mystery in production behavior
+
+**Trade-offs**
+- Onboarding a new business now requires writing `persona.yaml` before the business can be loaded at all (previously optional) — a small process cost.
+- The prior `_get_default_sections()` fallback-crash fix (Decision #013) no longer applies to `persona.yaml` specifically, since there is no fallback path left for it to crash on; #013 still applies to the remaining optional sections (`qualification`, `knowledge`, `tools`, `channels`, `guardrails`, `providers`).
+
+### Implementation
+
+`core_ai/business_config.py`: removed `"persona.yaml"` from `_OPTIONAL_FILES`; added `BusinessConfigRepository._load_persona()`, mirroring `_load_identity()`; `load()` now calls both directly and passes both `identity` and `persona` into `BusinessConfig(**kwargs)` outside the optional-files loop; `_get_default_sections()` no longer builds a persona default. Kaivix's own `config/businesses/kaivix/persona.yaml` already existed, so Kaivix's own `load()` behavior is unchanged.
+
+---
+
 
 
 \# Future Decisions

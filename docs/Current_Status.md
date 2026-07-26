@@ -33,17 +33,17 @@ Kaivix Core is a reusable AI Employee platform designed to allow businesses to d
 AI Employee Version 1 — BusinessConfig Refactoring Backlog
 
 **Current Milestone**
-BusinessConfig Refactoring Backlog, item #6 of 7 (ConversationEngine wiring)
+BusinessConfig Refactoring Backlog — complete (7 of 7). Decision #014 (persona-fallback policy) resolved. Next: begin Phase 2 (Appointment Scheduling).
 
 **Overall Progress**
-🟨 5 of 7 BusinessConfig refactoring backlog items complete. This backlog is the prerequisite for the rest of AI Employee V1 (scheduling, calendar integration, deployment) — none of that work has started yet.
+🟩 7 of 7 BusinessConfig refactoring backlog items complete. This backlog was the prerequisite for the rest of AI Employee V1 (scheduling, calendar integration, deployment) — that work can now begin.
 
 ---
 
 # Completed Components
 
 ## Core Engine
-- ✅ Conversation Engine
+- ✅ Conversation Engine — now resolves a `BusinessConfig` once at construction and threads it into every sub-component (backlog item #6, backlog complete 7/7)
 - ✅ Intent Detection
 - ✅ Goal Engine
 - ✅ Planning Engine
@@ -89,21 +89,17 @@ BusinessConfig Refactoring Backlog, item #6 of 7 (ConversationEngine wiring)
 # Currently In Progress
 
 **Current Focus**
-BusinessConfig refactoring backlog, item #6: wiring `ConversationEngine` to actually consume `BusinessConfig` (every other component already accepts it — this is the step that makes it load-bearing).
+The BusinessConfig refactoring backlog is done (7 of 7 items complete). Decision #014 (docs/Decision_Log.md) is resolved — `persona.yaml` is now required per business, like `identity.yaml`, with no fallback to Kaivix's own persona. Current focus: begin Phase 2 of the roadmap (Appointment Scheduling).
 
 **Current Tasks**
-- Ground `ConversationEngine`'s real constructor/`process_message` signature before design (in progress)
-- Wire `business_id` + resolved `BusinessConfig` into `ConversationEngine.__init__`
-- Pass `business_config`/`business_id` through to every sub-component call site inside `process_message`
-- Prove zero behavior change for Kaivix's own default path
-- Prove a second, distinct business_id actually produces different persona/qualification/knowledge/CRM behavior end-to-end
+- Scope and begin Phase 2, Milestone: Appointment Scheduling
 
 ---
 
 # Next Milestones
 
-## Milestone: BusinessConfig Refactoring Backlog (in progress)
-**Status:** 5 of 7 items complete
+## Milestone: BusinessConfig Refactoring Backlog (complete)
+**Status:** 7 of 7 items complete
 **Priority:** High
 
 Items:
@@ -112,7 +108,7 @@ Items:
 3. ✅ QualificationEngine schema-driven fields
 4. ✅ KnowledgeBase tenant-namespaced
 5. ✅ CRM + LongTermMemory schema (`business_id` column, composite uniqueness)
-6. ⬜ ConversationEngine wiring — in progress
+6. ✅ ConversationEngine wiring
 7. ✅ Dead-file cleanup (turned out to be a no-op — target files didn't exist)
 
 ## Milestone: Appointment Scheduling
@@ -195,13 +191,13 @@ Main
 # Project Goals
 
 **Immediate Goal**
-Complete the BusinessConfig refactoring backlog (2 items remaining), then complete AI Employee Version 1.
+Begin Phase 2 of AI Employee Version 1 (Appointment Scheduling, Google Calendar Integration, Production Testing).
 
 **Short-Term Goal**
 Begin customer outreach and secure the first paying client.
 
 **Medium-Term Goal**
-Convert Kaivix Core into a configurable AI Employee platform. (Substantially underway — 5 of 7 backlog items complete.)
+Convert Kaivix Core into a configurable AI Employee platform. (BusinessConfig refactoring backlog complete — 7 of 7 items.)
 
 **Long-Term Goal**
 Develop Kaivix into a multi-tenant enterprise AI platform, growing toward a full software-house-scale operation.
@@ -217,7 +213,7 @@ Version 1 is considered complete when the following are operational:
 - Knowledge retrieval
 - Lead qualification
 - CRM integration
-- Business configuration — in progress, 5/7 backlog items complete
+- Business configuration — backlog complete (7/7); Decision #014 (persona-fallback policy) resolved — `persona.yaml` required per business
 - Appointment scheduling
 - Google Calendar integration
 - Production testing
@@ -237,6 +233,9 @@ Only after these requirements are satisfied should Version 1 be considered compl
 - Backlog item #3: `QualificationEngine.required_fields` now derived from `BusinessConfig.qualification.fields`, filtered by `required`. Proven schema-driven with a second, distinct schema in tests, not just relabeled.
 - Backlog item #4: `KnowledgeBase` made tenant-namespaced. All 9 existing `.md` files moved via `git mv` (history preserved) into `knowledge/kaivix/`. Retrieval logic itself untouched — only the source directory changed.
 - Backlog item #5: `crm/leads.db`'s `leads` table changed from `email UNIQUE` to `business_id` column + composite `UNIQUE(business_id, email)` — the same class of correctness bug as item #1, fixed at the relational-schema level this time. `LongTermMemory` also gained a real, queryable `business_id` column in addition to its existing composite key. `Lead.from_row`'s positional tuple-fallback parsing was specifically tested against the new column to rule out silent index corruption.
+- Backlog item #6: `ConversationEngine` wired to actually consume `BusinessConfig` — the last component that still silently defaulted to Kaivix. Resolves `business_id`/`BusinessConfig` once at construction (Decision #011), threads it into `QualificationEngine`, `KnowledgeBase`, `PromptBuilder`, `LeadService`, and `LongTermMemory` call sites. Zero behavior change proven for Kaivix's own default path; a distinct second business proven to actually change persona/qualification/knowledge/CRM behavior end-to-end. **This closes the BusinessConfig refactoring backlog: 7 of 7 items complete.**
+- Building item #6's cross-business test surfaced a real bug: `BusinessConfigRepository._get_default_sections()` crashed with an unhandled `pydantic.ValidationError` instead of a `BusinessConfigError` when Kaivix's own reference config was incomplete. Fixed as Decision #013. Also surfaced an open product question: whether a business with no `persona.yaml` should really inherit Bray's identity via fallback (Decision #014).
+- Decision #014 resolved: `persona.yaml` is now required per business, exactly like `identity.yaml` — no fallback to Kaivix's own persona exists anymore. `BusinessConfigRepository` fails loudly with a `BusinessConfigError` if a business's `persona.yaml` is missing. `_get_default_sections()` no longer builds a persona default at all.
 
 Every milestone above: proven with a dedicated test (not just "it runs"), confirmed zero blast radius outside its named files via `git diff --stat`, and committed/pushed as an individual rollback checkpoint before the next milestone began.
 
@@ -244,9 +243,7 @@ Every milestone above: proven with a dedicated test (not just "it runs"), confir
 
 # Next Immediate Task
 
-Complete backlog item #6: wire `business_id` and a resolved `BusinessConfig` into `ConversationEngine` itself. This is the step that makes every seam built in items #1–#5 actually load-bearing — right now, every refactored component still silently defaults to Kaivix's own config because nothing upstream passes anything else in.
-
-Design note carried into this milestone: `business_id` will be bound once at `ConversationEngine.__init__`, not threaded through `process_message` per-message — consistent with the current architecture (`ChatService` holds one long-lived `ConversationEngine` instance) and the explicit V1 constraint of one deployment per customer. Per-message `business_id` resolution is deferred to the future multi-tenant-serving phase, not built prematurely now.
+Begin Phase 2 of the roadmap — Appointment Scheduling, then Google Calendar Integration, then Production Testing.
 
 ---
 

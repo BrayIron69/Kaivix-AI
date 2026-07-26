@@ -734,6 +734,90 @@ ConversationEngine Wiring (backlog item #6)
 
 ---
 
+# Milestone 4
+
+## ConversationEngine Wiring — Backlog Item #6 (Backlog Complete, 7/7)
+
+**Status**
+
+Completed
+
+**Completion Date**
+
+2026-07-26
+
+---
+
+### Objective
+
+Wire `ConversationEngine` — the only remaining component that didn't accept `BusinessConfig` — so every seam built in items #1–#5 becomes load-bearing end-to-end, not just accepted-and-ignored.
+
+---
+
+### Work Completed
+
+- `business_id` and an optional `business_config_repository` added to `ConversationEngine.__init__`, resolving a cached `BusinessConfig` once at construction (not per-message — see Decision #011).
+- `QualificationEngine` and `KnowledgeBase` now constructed with `business_config=self.business_config`.
+- `hydrate_long_term_memory`, `persist_long_term_memory`, and `lead_service.save` call sites now pass `business_id=self.business_id`.
+- `prompt_builder.build(...)` call site now passes `business_config=self.business_config`.
+- No change to pipeline order, `services/chat_service.py`, any API router, or any other engine file.
+
+This closes the BusinessConfig refactoring backlog: **7 of 7 items complete.**
+
+---
+
+### Files Modified
+
+- `core_ai/conversation_engine.py`
+- `tests/test_conversation_engine_business_config.py` (new)
+
+---
+
+### Architecture Impact
+
+None beyond what items #1–#5 already established. This milestone activates those seams; it introduces no new architectural pattern.
+
+---
+
+### Decisions Made
+
+Decision #011 (already logged, implemented here) — `business_id` bound once at construction, not per-message.
+Decision #013 (new) — `BusinessConfigRepository` now fails loudly instead of crashing opaquely when its own default reference is incomplete; found and fixed as a direct result of this milestone's cross-business test.
+Decision #014 (new, flagged open) — whether a business with no `persona.yaml` should really inherit Bray's identity via fallback. Not resolved; needs a product decision before onboarding a real second business.
+
+---
+
+### Testing
+
+- Default-path regression: `ConversationEngine()` with no args proven identical to pre-milestone behavior for a full turn.
+- Real cross-business proof: a distinct `business_config` (different persona name, different qualification fields, different knowledge namespace) actually produces a different assembled system prompt end-to-end — not just accepted as a parameter.
+- Cross-business CRM/LTM isolation confirmed at the `ConversationEngine` level (reusing the isolation pattern from item #5).
+
+Full suite: 26/26 passing (22 pre-existing + 4 new).
+
+---
+
+### Lessons Learned
+
+- Building the cross-business test (not just the default-path regression) is what surfaced Decision #013's real bug. A milestone that only re-confirms the default path can pass cleanly while the actual multi-tenant capability underneath is broken — the harder test was the valuable one.
+- `BusinessConfigRepository`'s fallback design has a genuine open product question (Decision #014) that only became visible once someone tried to actually construct a second business's config, even a test stand-in for one.
+
+---
+
+### Remaining Work
+
+- Decision #014: resolve the persona-fallback question before onboarding a real second business.
+- Previously flagged, still open: `PlanningEngine._FIELD_QUESTIONS` duplication; CRM `delete_lead` not `business_id`-scoped.
+- Phase 2 of the broader roadmap (appointment scheduling, Google Calendar integration, production testing) has not started.
+
+---
+
+### Next Milestone
+
+Resolve Decision #014, then begin Phase 2 (Appointment Scheduling).
+
+---
+
 
 
 \# Future Milestones

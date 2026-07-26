@@ -108,7 +108,6 @@ class BusinessConfig(BaseModel):
 
 _OPTIONAL_FILES.update(
     {
-        "persona.yaml": ("persona", BusinessPersona),
         "qualification.yaml": ("qualification", QualificationSchema),
         "knowledge.yaml": ("knowledge", KnowledgeConfig),
         "tools.yaml": ("tools", ToolsConfig),
@@ -159,7 +158,8 @@ class BusinessConfigRepository:
 
     Missing optional files/fields fall back to Kaivix's own values, read
     from Kaivix's own config directory (not duplicated as Python constants).
-    identity.yaml is the only file that is never optional.
+    identity.yaml and persona.yaml are required per business and never fall
+    back to Kaivix's own values.
     """
 
     def __init__(
@@ -178,10 +178,11 @@ class BusinessConfigRepository:
 
         business_dir = self._config_root / business_id
         identity = self._load_identity(business_dir, business_id)
+        persona = self._load_persona(business_dir, business_id)
 
         defaults = self._get_default_sections()
 
-        kwargs: dict[str, BaseModel] = {"identity": identity}
+        kwargs: dict[str, BaseModel] = {"identity": identity, "persona": persona}
         for filename, (field_name, model_cls) in _OPTIONAL_FILES.items():
             path = business_dir / filename
             if path.is_file():
@@ -204,6 +205,16 @@ class BusinessConfigRepository:
         data = _read_yaml(path)
         return _validate(BusinessIdentity, data, path)
 
+    def _load_persona(self, business_dir: Path, business_id: str) -> BusinessPersona:
+        path = business_dir / "persona.yaml"
+        if not path.is_file():
+            raise BusinessConfigError(
+                f"{path}: persona.yaml is required and was not found for "
+                f"business_id={business_id!r}"
+            )
+        data = _read_yaml(path)
+        return _validate(BusinessPersona, data, path)
+
     def _get_default_sections(self) -> dict[str, BaseModel]:
         """
         The Kaivix defaults: each optional section as found in Kaivix's own
@@ -221,7 +232,20 @@ class BusinessConfigRepository:
                 data = _read_yaml(path)
                 sections[field_name] = _validate(model_cls, data, path)
             else:
-                sections[field_name] = model_cls()
+                try:
+                    sections[field_name] = model_cls()
+                except ValidationError as exc:
+                    field_errors = "; ".join(
+                        f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
+                        for err in exc.errors()
+                    )
+                    raise BusinessConfigError(
+                        f"{path}: Kaivix's own reference config does not "
+                        f"define this file, and {model_cls.__name__} has no "
+                        f"usable bare default ({field_errors}) — the "
+                        f"default-sections fallback cannot supply a value "
+                        f"for this section"
+                    ) from exc
 
         self._default_sections = sections
         return sections
