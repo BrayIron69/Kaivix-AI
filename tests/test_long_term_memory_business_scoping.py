@@ -33,6 +33,20 @@ class TestLongTermMemoryBusinessScoping(unittest.TestCase):
         self.assertEqual(profile["name"], "Alice A")
         self.assertEqual(profile["company"], "Acme A")
 
+    def test_business_id_column_is_populated(self):
+        lead = LeadProfile(name="Bob", email="bob@example.com", company="Acme")
+        self.memory.remember(lead, business_id="business-a")
+
+        conn = self.store._get_connection()
+        row = conn.execute(
+            "SELECT business_id FROM long_term_memory WHERE key = ?",
+            ("business-a::bob@example.com",),
+        ).fetchone()
+        conn.close()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row["business_id"], "business-a")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -96,6 +96,7 @@ class SQLiteLongTermMemoryStore(BaseLongTermMemoryStore):
             """
             CREATE TABLE IF NOT EXISTS long_term_memory (
                 key TEXT PRIMARY KEY,
+                business_id TEXT DEFAULT '',
 
                 name TEXT DEFAULT '',
                 company TEXT DEFAULT '',
@@ -150,19 +151,22 @@ class SQLiteLongTermMemoryStore(BaseLongTermMemoryStore):
         conn = self._get_connection()
         cursor = conn.cursor()
 
+        business_id = profile.get("business_id", "") or ""
+
         if existing is None:
             cursor.execute(
                 """
                 INSERT INTO long_term_memory (
-                    key, name, company, email, industry, budget, timeline,
-                    important_notes, products_of_interest, pain_points,
-                    objections, buying_signals, preferences,
+                    key, business_id, name, company, email, industry, budget,
+                    timeline, important_notes, products_of_interest,
+                    pain_points, objections, buying_signals, preferences,
                     previous_conversations, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
+                    business_id,
                     row_values["name"],
                     row_values["company"],
                     row_values["email"],
@@ -184,13 +188,15 @@ class SQLiteLongTermMemoryStore(BaseLongTermMemoryStore):
             cursor.execute(
                 """
                 UPDATE long_term_memory
-                SET name = ?, company = ?, email = ?, industry = ?, budget = ?,
-                    timeline = ?, important_notes = ?, products_of_interest = ?,
-                    pain_points = ?, objections = ?, buying_signals = ?,
-                    preferences = ?, previous_conversations = ?, updated_at = ?
+                SET business_id = ?, name = ?, company = ?, email = ?,
+                    industry = ?, budget = ?, timeline = ?, important_notes = ?,
+                    products_of_interest = ?, pain_points = ?, objections = ?,
+                    buying_signals = ?, preferences = ?,
+                    previous_conversations = ?, updated_at = ?
                 WHERE key = ?
                 """,
                 (
+                    business_id,
                     row_values["name"],
                     row_values["company"],
                     row_values["email"],
@@ -219,6 +225,7 @@ class SQLiteLongTermMemoryStore(BaseLongTermMemoryStore):
     def _row_to_profile(self, row: sqlite3.Row) -> dict:
         profile = {field: row[field] for field in self._SCALAR_FIELDS}
         profile["key"] = row["key"]
+        profile["business_id"] = row["business_id"]
         profile["created_at"] = row["created_at"]
         profile["updated_at"] = row["updated_at"]
         for list_field in self._LIST_FIELDS:
@@ -382,6 +389,7 @@ class LongTermMemory:
         merged = dict(existing)
         merged["key"] = store_key
         merged["email"] = email
+        merged["business_id"] = business_id
 
         for field_name in self._SCALAR_LEAD_FIELDS:
             incoming = getattr(lead, field_name, "") or ""
@@ -428,6 +436,7 @@ class LongTermMemory:
     def _blank_profile(key: str, email: str) -> dict:
         return {
             "key": key,
+            "business_id": "",
             "name": "",
             "company": "",
             "email": email,

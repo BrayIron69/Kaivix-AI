@@ -43,6 +43,8 @@ class Lead:
     last_contacted: str | None = None
     created_at: str | None = None
 
+    business_id: str = ""
+
     score_reasons: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -56,6 +58,8 @@ class Lead:
             self.company = self.business
         if not self.business and self.company:
             self.business = self.company
+
+        self.business_id = _clean_text(self.business_id)
 
         self.phone = _clean_text(self.phone)
         self.industry = _clean_text(self.industry)
@@ -108,10 +112,35 @@ class Lead:
                 notes=data.get("notes", ""),
                 last_contacted=data.get("last_contacted"),
                 created_at=data.get("created_at"),
+                business_id=data.get("business_id", ""),
                 score_reasons=data.get("score_reasons", []) or [],
             )
 
-        # Legacy tuple fallback, current schema order first
+        # Legacy tuple fallback, current schema order first (business_id
+        # is the last column, so it doesn't disturb earlier indices)
+        if len(row) >= 18:
+            return cls(
+                id=row[0],
+                name=row[1],
+                email=row[2],
+                phone=row[3],
+                company=row[4],
+                business=row[5],
+                industry=row[6],
+                budget=row[7],
+                timeline=row[8],
+                pain_point=row[9],
+                decision_maker=row[10],
+                score=row[11],
+                priority=row[12],
+                status=row[13],
+                notes=row[14],
+                last_contacted=row[15],
+                created_at=row[16],
+                business_id=row[17],
+            )
+
+        # Pre-business_id schema (17 columns, no business_id column)
         if len(row) >= 17:
             return cls(
                 id=row[0],
@@ -175,5 +204,6 @@ class Lead:
             "notes": _clean_text(self.notes),
             "last_contacted": _clean_text(self.last_contacted) or None,
             "created_at": _clean_text(self.created_at) or None,
+            "business_id": _clean_text(self.business_id),
             "score_reasons": list(self.score_reasons or []),
         }

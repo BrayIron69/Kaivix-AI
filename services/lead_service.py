@@ -1,4 +1,5 @@
 from crm.sqlite_crm import SQLiteCRM
+from core_ai.business_config import DEFAULT_BUSINESS_ID
 
 
 _PLACEHOLDER_VALUES = {"string", "none", "null"}
@@ -72,35 +73,38 @@ class LeadService:
 
         return normalized
 
-    def save(self, lead):
+    def save(self, lead, business_id=DEFAULT_BUSINESS_ID):
         print("[LeadService] Saving lead...")
-        result = self.crm.save_lead(self._normalize_payload(lead))
+        result = self.crm.save_lead(
+            self._normalize_payload(lead), business_id=business_id
+        )
         print("[LeadService] Lead saved.")
         return result
 
     # Backward compatibility
-    def save_lead(self, lead):
-        return self.save(lead)
+    def save_lead(self, lead, business_id=DEFAULT_BUSINESS_ID):
+        return self.save(lead, business_id=business_id)
 
-    def get_by_email(self, email):
-        return self.crm.get_lead_by_email(email)
+    def get_by_email(self, email, business_id=DEFAULT_BUSINESS_ID):
+        return self.crm.get_lead_by_email(email, business_id=business_id)
 
-    def get_lead_by_email(self, email):
-        return self.get_by_email(email)
+    def get_lead_by_email(self, email, business_id=DEFAULT_BUSINESS_ID):
+        return self.get_by_email(email, business_id=business_id)
 
-    def get_all(self):
-        return self.crm.get_all_leads()
+    def get_all(self, business_id=DEFAULT_BUSINESS_ID):
+        return self.crm.get_all_leads(business_id=business_id)
 
-    def get_all_leads(self):
-        return self.get_all()
+    def get_all_leads(self, business_id=DEFAULT_BUSINESS_ID):
+        return self.get_all(business_id=business_id)
 
-    def update(self, email, **updates):
+    def update(self, email, business_id=DEFAULT_BUSINESS_ID, **updates):
         normalized = self._normalize_payload(updates)
         normalized.pop("email", None)
-        return self.crm.update_lead(email, **normalized)
+        normalized.pop("business_id", None)
+        return self.crm.update_lead(email, business_id=business_id, **normalized)
 
-    def update_lead(self, email, **updates):
-        return self.update(email, **updates)
+    def update_lead(self, email, business_id=DEFAULT_BUSINESS_ID, **updates):
+        return self.update(email, business_id=business_id, **updates)
 
     def delete(self, email):
         return self.crm.delete_lead(email)

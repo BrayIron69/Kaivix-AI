@@ -16,7 +16,7 @@ def get_connection():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
             name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
+            email TEXT NOT NULL,
 
             phone TEXT,
 
@@ -42,7 +42,11 @@ def get_connection():
 
             last_contacted TEXT,
 
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            business_id TEXT NOT NULL DEFAULT 'kaivix',
+
+            UNIQUE(business_id, email)
         )
         """
     )
@@ -57,6 +61,7 @@ def get_connection():
         "company": "TEXT",
         "industry": "TEXT",
         "decision_maker": "TEXT",
+        "business_id": "TEXT NOT NULL DEFAULT 'kaivix'",
     }
 
     for column, column_type in migrations.items():

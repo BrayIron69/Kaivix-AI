@@ -1,5 +1,6 @@
 from crm.base_crm import BaseCRM
 from crm.database import get_connection
+from core_ai.business_config import DEFAULT_BUSINESS_ID
 
 try:
     from core_ai.lead_profile import LeadProfile
@@ -57,14 +58,14 @@ class SQLiteCRM(BaseCRM):
     # Public API
     # --------------------------------------------------
 
-    def save_lead(self, lead):
+    def save_lead(self, lead, business_id=DEFAULT_BUSINESS_ID):
         lead = self._lead_to_dict(lead)
 
         email = lead.get("email")
         if not email:
             raise ValueError("Lead email is required.")
 
-        existing = self.get_lead_by_email(email)
+        existing = self.get_lead_by_email(email, business_id=business_id)
 
         # --------------------------------------------------
         # INSERT
@@ -92,9 +93,10 @@ class SQLiteCRM(BaseCRM):
                     priority,
                     status,
                     notes,
-                    last_contacted
+                    last_contacted,
+                    business_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lead.get("name", ""),
@@ -112,6 +114,7 @@ class SQLiteCRM(BaseCRM):
                     lead.get("status", "New"),
                     lead.get("notes", ""),
                     lead.get("last_contacted"),
+                    business_id,
                 ),
             )
 
@@ -119,7 +122,7 @@ class SQLiteCRM(BaseCRM):
             conn.close()
 
             print(f"[SQLiteCRM] Save complete: {email}")
-            return self.get_lead_by_email(email)
+            return self.get_lead_by_email(email, business_id=business_id)
 
         # --------------------------------------------------
         # UPDATE
@@ -129,15 +132,17 @@ class SQLiteCRM(BaseCRM):
         existing = self._lead_to_dict(existing)
         merged = self._merge(existing, lead)
 
-        # email is the lookup key; do not send it to update_lead again
+        # email/business_id are the lookup key; do not send them to
+        # update_lead again as generic SET fields
         merged.pop("email", None)
+        merged.pop("business_id", None)
 
-        self.update_lead(email, **merged)
+        self.update_lead(email, business_id=business_id, **merged)
 
         print(f"[SQLiteCRM] Save complete: {email}")
-        return self.get_lead_by_email(email)
+        return self.get_lead_by_email(email, business_id=business_id)
 
-    def get_all_leads(self):
+    def get_all_leads(self, business_id=DEFAULT_BUSINESS_ID):
         conn = get_connection()
         cursor = conn.cursor()
 
@@ -145,8 +150,10 @@ class SQLiteCRM(BaseCRM):
             """
             SELECT *
             FROM leads
+            WHERE business_id = ?
             ORDER BY created_at DESC
-            """
+            """,
+            (business_id,),
         )
 
         rows = cursor.fetchall()
@@ -157,7 +164,7 @@ class SQLiteCRM(BaseCRM):
 
         return rows
 
-    def get_lead_by_email(self, email):
+    def get_lead_by_email(self, email, business_id=DEFAULT_BUSINESS_ID):
         conn = get_connection()
         cursor = conn.cursor()
 
@@ -165,9 +172,9 @@ class SQLiteCRM(BaseCRM):
             """
             SELECT *
             FROM leads
-            WHERE email = ?
+            WHERE email = ? AND business_id = ?
             """,
-            (email,),
+            (email, business_id),
         )
 
         row = cursor.fetchone()
@@ -181,7 +188,7 @@ class SQLiteCRM(BaseCRM):
 
         return row
 
-    def update_lead(self, email, **updates):
+    def update_lead(self, email, business_id=DEFAULT_BUSINESS_ID, **updates):
         allowed = [
             "name",
             "phone",
@@ -216,6 +223,7 @@ class SQLiteCRM(BaseCRM):
             return False
 
         values.append(email)
+        values.append(business_id)
 
         conn = get_connection()
         cursor = conn.cursor()
@@ -224,7 +232,7 @@ class SQLiteCRM(BaseCRM):
             f"""
             UPDATE leads
             SET {", ".join(fields)}
-            WHERE email = ?
+            WHERE email = ? AND business_id = ?
             """,
             values,
         )
