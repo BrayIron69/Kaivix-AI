@@ -742,6 +742,149 @@ Trade-offs
 
 \---
 
+# Decision #009
+
+## Config-Driven Refactor Delivered Incrementally, Not as a Big-Bang Rewrite
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+BusinessConfig existed as a spec and as unconsumed scaffolding. Every engine component (PromptBuilder, QualificationEngine, KnowledgeBase, CRM, LongTermMemory) still hardcoded Kaivix-specific values. Wiring all of them to BusinessConfig at once would touch the entire pipeline in a single change, with a large surface area for regressions.
+
+### Decision
+
+Each component was given an optional `business_config`/`business_id` parameter, defaulting internally to Kaivix's own config (`DEFAULT_BUSINESS_ID = "kaivix"`) when not supplied. Components were migrated one at a time, in backlog order, each proven independently before the next began. `ConversationEngine` itself — the only caller of all these components — was deliberately left untouched until every callee already supported the seam.
+
+### Reasoning
+
+This means every intermediate state of the refactor is a fully working, fully tested system with zero observable behavior change, rather than a multi-file change that only works once everything lands together. It also means each milestone has an independent, verifiable acceptance test (usually: prove byte-identical output for Kaivix's default path, then prove a second, distinct config actually changes behavior).
+
+### Consequences
+
+**Benefits**
+- Every milestone independently revertible via git
+- No "half-wired" intermediate state where the system is broken
+- Each component's config-driven behavior is tested in isolation before the orchestrator ties them together
+
+**Trade-offs**
+- Until item #6 lands, `BusinessConfig` exists as dead weight for every component except when explicitly passed in tests — no runtime code path actually varies behavior by business yet.
+- More total milestones than a single large refactor would have taken.
+
+---
+
+# Decision #010
+
+## Tenant Scoping Implementation Differs by Storage Backend, Same Guarantee
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+Two different storage backends needed tenant scoping: `LongTermMemory` (SQLite, key-value interface via `BaseLongTermMemoryStore`) and the CRM (SQLite, relational table with a `UNIQUE` constraint). A single uniform implementation didn't fit both cleanly.
+
+### Decision
+
+`LongTermMemory` encodes `business_id` into a composite string key (`f"{business_id}::{email}"`) passed through its existing opaque `get(key)`/`save(key, profile)` interface — no interface or schema change needed beyond adding a queryable `business_id` column for visibility. The CRM's `leads` table instead gained a real `business_id` column with a table-level `UNIQUE(business_id, email)` constraint, since SQL uniqueness constraints require real columns, not string-encoded compound keys.
+
+### Reasoning
+
+Each backend already had a stable interface shape (`BaseLongTermMemoryStore`'s opaque key, and the `leads` table's relational schema); the tenant-scoping fix should adapt to each shape rather than forcing one implementation pattern onto both. The correctness guarantee (no cross-business data collision) is identical in both cases even though the mechanism differs.
+
+### Consequences
+
+**Benefits**
+- Neither storage backend's public interface changed
+- Each fix is the minimal, idiomatic change for its own backend
+
+**Trade-offs**
+- Two different-looking implementations of "the same kind of fix," which could read as inconsistent to someone unfamiliar with the reasoning — hence this decision entry.
+
+---
+
+# Decision #011
+
+## business_id Bound Once at ConversationEngine Construction, Not Per-Message
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted (pending backlog item #6 implementation)
+
+### Context
+
+The original backlog wording called for `ConversationEngine` to accept `business_id` in both its constructor and `process_message` signature. `ChatService` holds exactly one long-lived `ConversationEngine` instance and reuses it for every conversation. The project's explicit V1 constraint (per the founding handoff document) is one deployment per customer.
+
+### Decision
+
+`business_id` is resolved once, at `ConversationEngine.__init__`, into a cached `BusinessConfig`. `process_message`'s signature is not changed. No caller (`ChatService`, any API router) needs modification.
+
+### Reasoning
+
+Under a one-deployment-per-customer model, `business_id` cannot legitimately vary between messages within a single running process — there is only one business per deployment. Threading it through `process_message` now would add a parameter with no real use case yet, and would require touching every call site for no behavioral gain. Real multi-tenant serving (one process handling many businesses) is an explicitly deferred future phase, not a current requirement.
+
+### Consequences
+
+**Benefits**
+- Smaller diff, fewer files touched
+- No caller code changes required
+- Correctly scoped to what V1 actually needs
+
+**Trade-offs**
+- When true multi-tenant serving is eventually built (multiple businesses through one running process), `process_message` will need its own `business_id` parameter at that point — this decision will need to be revisited, not just extended.
+
+---
+
+# Decision #012
+
+## Real Data-Loss Risk Confirmed Before Every Disposable-Data Reset
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+Several backlog items required schema changes to `crm/leads.db` and `memory/long_term_memory.db` that were easiest to implement as a fresh rebuild rather than an in-place data migration.
+
+### Decision
+
+Before any database file was deleted and regenerated, the founder was explicitly asked whether its contents were disposable dev/test data or real captured leads, on a per-database, per-milestone basis — this was not assumed once and reused.
+
+### Reasoning
+
+`memory/long_term_memory.db` and `crm/leads.db` have different real-world risk profiles: the former is purely internal test data, the latter is fed by the live website's chat widget and could plausibly contain real visitor-submitted leads. Treating them identically without asking would have risked silent data loss.
+
+### Consequences
+
+**Benefits**
+- Zero risk of destroying real business data during a schema refactor
+- Establishes the standing pattern for any future schema-changing milestone
+
+**Trade-offs**
+- None — this is a pure process safeguard.
+
+---
+
 
 
 \# Future Decisions

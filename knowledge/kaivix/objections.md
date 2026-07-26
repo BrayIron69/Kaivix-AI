@@ -12,7 +12,7 @@ ChatGPT is a tool, not an employee. It doesn't know your business, your products
 
 ## "It's too expensive"
 
-Compare this to what you're currently spending. A part-time employee costs $1,500 to $3,000 per month minimum — before benefits, sick days, or turnover costs. An AI employee starts at $497/month and works 24/7. Most clients recover the cost in the first week of saved time alone.
+Compare this to what you're currently spending. A part-time employee costs $1,500 to $3,000 per month minimum — before benefits, sick days, or turnover costs. An AI employee costs a fraction of that and works 24/7. Most clients recover the cost quickly through saved time alone.
 
 ---
 
@@ -48,7 +48,7 @@ Ask what it does for them. Then explain the difference — Kaivix Labs builds AI
 
 ## "Just tell me the price"
 
-Happy to. Pricing depends on what they need automated. Lead qualification agent starts at $997 setup and $497/month. Customer support agent starts at $1,497 setup and $597/month. Ask which one matches their situation and give the relevant price directly.
+Happy to talk pricing. Ask what they need automated — support, leads, voice, or custom — then follow the pricing-conversation policy in pricing.md: give a rough shape (a one-time setup fee plus a small monthly retainer for hosting and maintenance), explain what the retainer covers, and offer a free discovery call for a firm, custom quote. Never state an exact number here — Bray doesn't have one to give.
 
 ---
 

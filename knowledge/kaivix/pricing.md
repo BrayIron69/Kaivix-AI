@@ -9,8 +9,8 @@ Pricing is based on what you're automating and how complex the build is.
 
 Best for: businesses that want to automatically qualify website visitors and capture leads 24/7.
 
-- Setup fee: $997 one-time (non-refundable once development starts)
-- Monthly retainer: $497/month (hosting, monitoring, maintenance, updates)
+- One-time setup fee, scoped to the build
+- Small monthly retainer for hosting, monitoring, maintenance, and updates
 
 ---
 
@@ -18,8 +18,8 @@ Best for: businesses that want to automatically qualify website visitors and cap
 
 Best for: ecommerce stores, service businesses, and SaaS companies drowning in repetitive support tickets.
 
-- Setup fee: $1,497 one-time
-- Monthly retainer: $597/month
+- One-time setup fee, scoped to the build
+- Small monthly retainer for hosting, monitoring, maintenance, and updates
 
 ---
 
@@ -27,8 +27,8 @@ Best for: ecommerce stores, service businesses, and SaaS companies drowning in r
 
 Best for: businesses that want an AI that answers phone calls, qualifies callers, and books appointments automatically.
 
-- Setup fee: $2,497 one-time
-- Monthly retainer: $797/month
+- One-time setup fee, scoped to the build
+- Small monthly retainer for hosting, monitoring, maintenance, and updates
 
 ---
 
@@ -37,7 +37,6 @@ Best for: businesses that want an AI that answers phone calls, qualifies callers
 Best for: companies that need something built specifically around their operations, data, and integrations.
 
 - Quoted individually based on scope
-- Starts from $1,997 setup
 
 ---
 
@@ -51,23 +50,16 @@ Best for: companies that need something built specifically around their operatio
 
 ---
 
-## Founding Client Discount
+## Pricing Conversation Policy
 
-Kaivix Labs is currently offering a founding client rate for the first two clients:
-- $697 setup + $297/month in exchange for a testimonial and case study.
+Bray must never invent a price and must never quote an exact dollar figure to a visitor who hasn't been qualified yet. The real numbers live outside this document and are not something Bray has access to.
 
----
+If a visitor asks about price, Bray should:
+1. Ask what they need automated — support, leads, voice, or custom.
+2. Give a rough shape, not a number — e.g. "projects like this are typically a one-time setup fee plus a small monthly retainer for hosting and maintenance — the exact number depends on scope."
+3. Explain that the retainer covers everything ongoing (hosting, monitoring, updates, support).
+4. Offer to book a free discovery call for a firm, custom quote.
 
-## Pricing Policy
-
-Bray should never invent prices outside this document.
-
-If a visitor asks for a price, Bray should:
-1. Ask what they need automated (support, leads, voice, custom).
-2. Share the relevant package from this document.
-3. Explain that the retainer covers everything ongoing.
-4. Offer to book a free demo call for a custom quote if needed.
-
-Compare the cost to what they are currently spending on staff.
-A part-time employee costs $1,500 to $3,000 per month minimum.
-An AI employee costs a fraction of that and works 24/7.
+The staff-cost comparison below is approved for Bray to say out loud, but only once the visitor has actually engaged with cost or ROI — never as an opener:
+- A part-time employee costs $1,500 to $3,000 per month minimum.
+- An AI employee costs a fraction of that and works 24/7.
