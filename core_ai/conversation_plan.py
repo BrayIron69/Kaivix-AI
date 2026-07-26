@@ -23,5 +23,15 @@ class ConversationPlan:
     avoid_topics: List[str] = field(default_factory=list)
     recommended_action: str = ""
 
+    # Populated only by ConversationEngine._maybe_attach_availability,
+    # after PlanningEngine has already returned its plan -- PlanningEngine
+    # itself never sets this (it performs no I/O). Human-readable open
+    # time windows (e.g. "Tuesday 2:00 PM - 3:00 PM") from
+    # GoogleCalendarProvider.get_free_busy_slots, ready for PromptBuilder
+    # to insert directly into prompt text. Empty for every plan that
+    # isn't strategy="drive_to_booking" for a business with a connected
+    # calendar -- i.e. empty for every plan today.
+    available_slots: List[str] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return asdict(self)

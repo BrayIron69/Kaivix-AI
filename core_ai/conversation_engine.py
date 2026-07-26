@@ -1,6 +1,8 @@
+from dataclasses import replace
 from typing import Optional
 
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
+from core_ai.conversation_plan import ConversationPlan
 from core_ai.lead_profile import LeadProfile
 from knowledge.knowledge_base import KnowledgeBase
 from utils.llm import LLM
@@ -16,6 +18,7 @@ from core_ai.prompt_builder import PromptBuilder
 from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
 from core_ai.working_memory import WorkingMemory
+from scheduling.google_calendar_provider import GoogleCalendarProvider
 from services.lead_service import LeadService
 from utils.logger import Logger
 
@@ -88,6 +91,7 @@ class ConversationEngine:
         self.qualification_engine = QualificationEngine(business_config=self.business_config)
         self.prompt_builder = PromptBuilder()
         self.lead_service = LeadService()
+        self.calendar_provider = GoogleCalendarProvider()
 
         # Coordinates WorkingMemory (every turn), ConversationSummary
         # (every `summary_refresh_interval_turns` turns), and
@@ -174,6 +178,13 @@ class ConversationEngine:
             history=history,
             working_memory=working_memory,
         )
+
+        # Read-only: attaches real calendar availability to the plan when
+        # PlanningEngine has already decided to drive toward booking and
+        # this business has a connected calendar. PlanningEngine itself
+        # performs no I/O (see its docstring) -- this lookup belongs here,
+        # one step after the plan is produced, not inside PlanningEngine.
+        plan = self._maybe_attach_availability(conversation_id, plan)
 
         knowledge = self._gather_knowledge(conversation_id, user_message)
 
@@ -336,6 +347,43 @@ class ConversationEngine:
             return ConversationStage.PRESENTATION
 
         return ConversationStage.CLOSING
+
+    # ------------------------------------------------------------------
+    # Scheduling / Calendar
+    # ------------------------------------------------------------------
+
+    def _maybe_attach_availability(
+        self, conversation_id: str, plan: ConversationPlan
+    ) -> ConversationPlan:
+        """
+        When PlanningEngine has decided to drive toward booking
+        (plan.strategy == "drive_to_booking") and this business has a
+        connected Google Calendar, attach real available time windows to
+        the plan so PromptBuilder can have Bray offer them naturally
+        instead of a vague "let's book a call." Read-only -- never
+        creates or modifies an event.
+
+        Mirrors _sync_lead_to_crm's error-handling contract: calendar
+        failures are logged and the original plan is returned unchanged,
+        never interrupting the conversation. Returns a new plan via
+        dataclasses.replace rather than mutating the one PlanningEngine
+        returned.
+        """
+        try:
+            if plan.strategy != "drive_to_booking":
+                return plan
+
+            if not self.calendar_provider.is_connected(self.business_id):
+                return plan
+
+            slots = self.calendar_provider.get_free_busy_slots(self.business_id)
+            return replace(plan, available_slots=slots)
+        except Exception as error:
+            self.logger.error(
+                f"[GoogleCalendarProvider] Failed to fetch availability "
+                f"(conversation_id={conversation_id}): {error}"
+            )
+            return plan
 
     # ------------------------------------------------------------------
     # Knowledge & qualification

@@ -14,8 +14,9 @@ class BaseCalendarProvider(ABC):
     means writing a new subclass of this class.
 
     This is scaffolding only -- booking-specific methods (create_event,
-    check availability, etc.) intentionally do not exist yet. That is a
-    later milestone; this one is the OAuth + token-storage foundation.
+    etc.) intentionally do not exist yet. That is a later milestone.
+    get_free_busy_slots below is read-only: it surfaces availability, it
+    never creates or modifies an event.
     """
 
     @abstractmethod
@@ -40,4 +41,22 @@ class BaseCalendarProvider(ABC):
     @abstractmethod
     def list_calendars(self, business_id: str = DEFAULT_BUSINESS_ID) -> list[dict]:
         """Return this business's connected account's calendars."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_free_busy_slots(
+        self, business_id: str = DEFAULT_BUSINESS_ID, days_ahead: int = 7
+    ) -> list[str]:
+        """
+        Return at most 3 upcoming open time windows within this
+        business's working hours over the next `days_ahead` days, as
+        human-readable strings (e.g. "Tuesday 2:00 PM - 3:00 PM") ready
+        to be inserted directly into prompt text -- not raw ISO
+        timestamps. Read-only: never creates or modifies an event.
+
+        Must return an empty list (never raise) if the calendar isn't
+        connected for this business_id, or if the lookup fails for any
+        reason -- callers must be able to treat this as "no availability
+        to offer right now" without special-casing failures.
+        """
         raise NotImplementedError

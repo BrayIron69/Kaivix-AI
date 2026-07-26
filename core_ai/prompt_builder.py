@@ -199,6 +199,14 @@ RULES:
                     "(Still answer directly if the visitor asks about it themselves.)",
                 ]
 
+            plan_available_slots = getattr(plan, "available_slots", None) or []
+            if plan_available_slots:
+                sections += [
+                    "",
+                    "REAL AVAILABLE TIMES (offer these instead of a vague booking ask):",
+                    *[f"- {slot}" for slot in plan_available_slots],
+                ]
+
         sections += [
             "",
             self.ENGINE_RULES.format(

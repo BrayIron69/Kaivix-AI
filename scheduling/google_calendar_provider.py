@@ -1,8 +1,20 @@
 import os
+from datetime import datetime, time, timedelta
+from typing import Optional
+from zoneinfo import ZoneInfo
 
-from core_ai.business_config import DEFAULT_BUSINESS_ID
+from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from scheduling.base_calendar_provider import BaseCalendarProvider
 from scheduling.calendar_token_store import CalendarTokenStore
+
+# Fixed business-hours window used by get_free_busy_slots for every
+# business today (9-5, Monday-Friday, in the business's own timezone --
+# see BusinessConfig.identity.timezone). Per-business configurable hours
+# are a later milestone; this scaffolding assumes the same window for
+# everyone.
+_BUSINESS_HOURS_START = time(9, 0)
+_BUSINESS_HOURS_END = time(17, 0)
+_MAX_RETURNED_SLOTS = 3
 
 # Must match the redirect URI registered in Google Cloud for this OAuth
 # client, and api/routers/calendar_oauth.py's /oauth/google/callback route.
@@ -42,10 +54,19 @@ class GoogleCalendarProvider(BaseCalendarProvider):
     CalendarTokenStore's docstring).
     """
 
-    def __init__(self, token_store: CalendarTokenStore | None = None):
+    def __init__(
+        self,
+        token_store: CalendarTokenStore | None = None,
+        business_config_repository: Optional[BusinessConfigRepository] = None,
+    ):
         self.client_id = os.getenv("GOOGLE_CLIENT_ID")
         self.client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         self.token_store = token_store or CalendarTokenStore()
+        # Used only by get_free_busy_slots, to read the business's own
+        # timezone (BusinessConfig.identity.timezone) -- same
+        # optional-dependency pattern as ConversationEngine's own
+        # business_config_repository.
+        self.business_config_repository = business_config_repository or BusinessConfigRepository()
 
     # ------------------------------------------------------------------
     # Internal
@@ -152,3 +173,133 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         service = build("calendar", "v3", credentials=credentials, static_discovery=True)
         calendar_list = service.calendarList().list().execute()
         return calendar_list.get("items", [])
+
+    def get_free_busy_slots(
+        self, business_id: str = DEFAULT_BUSINESS_ID, days_ahead: int = 7
+    ) -> list[str]:
+        # Contract (see BaseCalendarProvider): never raise, always return
+        # a list -- an empty one whenever the calendar isn't connected or
+        # anything about the lookup fails, so callers can treat this as
+        # "nothing to offer right now" without special-casing failures.
+        try:
+            credentials = self._load_credentials(business_id)
+            if credentials is None:
+                return []
+
+            business_config = self.business_config_repository.load(business_id)
+            tz = ZoneInfo(business_config.identity.timezone)
+            now = datetime.now(tz)
+
+            day_windows = self._business_hour_windows(now, tz, days_ahead)
+            if not day_windows:
+                return []
+
+            from googleapiclient.discovery import build
+
+            # static_discovery avoids a network round-trip to
+            # www.googleapis.com for the API discovery document -- same
+            # reasoning as list_calendars above.
+            service = build("calendar", "v3", credentials=credentials, static_discovery=True)
+            freebusy_response = (
+                service.freebusy()
+                .query(
+                    body={
+                        "timeMin": day_windows[0][0].isoformat(),
+                        "timeMax": day_windows[-1][1].isoformat(),
+                        # Single connected account's own calendar -- which
+                        # specific calendar to check is a later,
+                        # multi-calendar milestone.
+                        "items": [{"id": "primary"}],
+                    }
+                )
+                .execute()
+            )
+
+            busy_blocks = [
+                (
+                    datetime.fromisoformat(block["start"]).astimezone(tz),
+                    datetime.fromisoformat(block["end"]).astimezone(tz),
+                )
+                for block in freebusy_response.get("calendars", {})
+                .get("primary", {})
+                .get("busy", [])
+            ]
+
+            open_slots = []
+            for window_start, window_end in day_windows:
+                open_slots.extend(self._subtract_busy(window_start, window_end, busy_blocks))
+                if len(open_slots) >= _MAX_RETURNED_SLOTS:
+                    break
+
+            return [
+                self._format_slot(start, end) for start, end in open_slots[:_MAX_RETURNED_SLOTS]
+            ]
+
+        except Exception:
+            return []
+
+    # ------------------------------------------------------------------
+    # get_free_busy_slots internals
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _business_hour_windows(now: datetime, tz: ZoneInfo, days_ahead: int) -> list[tuple]:
+        """
+        Build the list of (start, end) business-hour windows (9-5,
+        Monday-Friday, in `tz`) from today through `days_ahead` days out.
+        Today's window is clamped to start at `now` if business hours are
+        already underway, and skipped entirely if today's business hours
+        have already ended.
+        """
+        windows = []
+        for offset in range(days_ahead + 1):
+            day = (now + timedelta(days=offset)).date()
+            if day.weekday() >= 5:  # Saturday=5, Sunday=6
+                continue
+
+            window_start = datetime.combine(day, _BUSINESS_HOURS_START, tzinfo=tz)
+            window_end = datetime.combine(day, _BUSINESS_HOURS_END, tzinfo=tz)
+
+            if window_end <= now:
+                continue
+            if window_start < now:
+                window_start = now
+            if window_start >= window_end:
+                continue
+
+            windows.append((window_start, window_end))
+
+        return windows
+
+    @staticmethod
+    def _subtract_busy(
+        window_start: datetime, window_end: datetime, busy_blocks: list[tuple]
+    ) -> list[tuple]:
+        """
+        Return the free (start, end) sub-windows of [window_start,
+        window_end) left after removing every overlapping busy block.
+        """
+        relevant = sorted(
+            (max(busy_start, window_start), min(busy_end, window_end))
+            for busy_start, busy_end in busy_blocks
+            if busy_end > window_start and busy_start < window_end
+        )
+
+        open_slots = []
+        cursor = window_start
+        for busy_start, busy_end in relevant:
+            if busy_start > cursor:
+                open_slots.append((cursor, busy_start))
+            cursor = max(cursor, busy_end)
+
+        if cursor < window_end:
+            open_slots.append((cursor, window_end))
+
+        return open_slots
+
+    @staticmethod
+    def _format_slot(start: datetime, end: datetime) -> str:
+        weekday = start.strftime("%A")
+        start_str = start.strftime("%I:%M %p").lstrip("0")
+        end_str = end.strftime("%I:%M %p").lstrip("0")
+        return f"{weekday} {start_str} - {end_str}"
