@@ -961,6 +961,198 @@ Deliberately left open at #013's investigation time rather than fixed opportunis
 
 ---
 
+# Decision #015
+
+## ConversationMemory Persistence: SQLite, Tenant-Scoped From Day One
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+ConversationMemory was in-memory only (a defaultdict), losing all active conversations on any process restart. Its own docstring already anticipated a swap to a persistent backend.
+
+### Decision
+
+Replaced with a SQLite-backed store (memory/conversation_memory.db), following the same BaseCRM/BaseLongTermMemoryStore abstraction pattern already used elsewhere. Unlike CRM and LongTermMemory, this was built with a business_id column from the start, not retrofitted later.
+
+### Reasoning
+
+SQLite matches every other storage layer in this project and requires no new infrastructure (no Redis service to operate). Building it tenant-scoped immediately applies the direct lesson from Decisions in the earlier backlog, where CRM and LongTermMemory both needed correctness-bug fixes after the fact.
+
+### Consequences
+
+**Benefits:** conversations survive restarts; consistent storage pattern; no retrofit needed later.
+
+**Trade-offs:** none identified.
+
+---
+
+# Decision #016
+
+## Pricing Numbers Removed Structurally, Not Just by Instruction
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+A real production bug: Bray could quote exact prices to unqualified visitors. The root cause was structural — real dollar figures lived in the same retrievable documents (knowledge/kaivix/pricing.md AND knowledge/kaivix/objections.md, the latter found independently mid-fix) that Bray's own instructions told it to quote directly from.
+
+### Decision
+
+Real numbers were removed entirely from every document KnowledgeBase can retrieve, and moved to docs/Internal_Pricing_Reference.md, a path structurally outside KnowledgeBase's glob scope. PromptBuilder's ENGINE_RULES rule 7 was reworded to be business-agnostic pricing-policy guidance instead of "give it directly."
+
+### Reasoning
+
+An LLM instructed "don't quote this number" while the number sits directly in its context is an unreliable safeguard. Removing the number from anything retrievable is a deterministic guarantee, consistent with this project's established preference for Python-enforced correctness over prompt-only instructions.
+
+### Consequences
+
+**Benefits:** structurally impossible for Bray to leak Kaivix's real pricing figures, verified by a dedicated test scanning all loaded documents for dollar patterns.
+
+**Trade-offs:** none identified.
+
+---
+
+# Decision #017
+
+## Conversation-Quality Eval Suite Kept Separate From CI Unit Tests
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+All existing tests (65+ at the time) prove architectural correctness deterministically. None prove Bray actually behaves well in real conversation — exactly the kind of gap that let the pricing leak ship undetected.
+
+### Decision
+
+Built evals/run_conversation_evals.py as a standalone, manually-run script — not part of python -m unittest discover -s tests. It calls the real Groq LLM, runs each scripted scenario 3 times to reduce flakiness, and uses pattern-based checks (no_price_leak, no_bot_admission, no_crash) rather than exact-match assertions.
+
+### Reasoning
+
+Non-deterministic, API-costing, network-dependent checks would make the regular test suite flaky and slow if mixed in. This is a pre-deploy quality gate, run deliberately before shipping prompt/knowledge/persona changes, not on every commit.
+
+### Consequences
+
+**Benefits:** a real safety net for conversational regressions that architecture tests can't catch; reuses the pricing allowlist logic directly from the test suite so the two can't drift apart.
+
+**Trade-offs:** requires manual/deliberate running; not enforced automatically in CI.
+
+---
+
+# Decision #018
+
+## Calendar OAuth: Tenant-Scoped Token Storage, Shared App-Level Credentials
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+Google Calendar integration needed per-business calendar connections. There is currently one shared Google Cloud OAuth application (one Client ID/Secret) for the whole platform, not a separate OAuth app per business.
+
+### Decision
+
+scheduling/calendar_token_store.py stores each business's resulting token/refresh_token/scopes, keyed by business_id as primary key (one connection per business). GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET are read from environment variables at the provider level, NOT stored per-business-row.
+
+### Reasoning
+
+The OAuth application itself is shared platform infrastructure; only the resulting per-business authorization (which calendar, whose consent) is genuinely tenant-specific data. Storing client credentials redundantly per row would add no correctness benefit and more secret-handling surface area.
+
+### Consequences
+
+**Benefits:** clean separation between platform-level app credentials and business-level authorization; matches how CRM/LTM already separate "the database" from "the tenant's rows."
+
+**Trade-offs:** if a future business needs its own entirely separate Google Cloud OAuth app (e.g. their own branding on the consent screen), the schema would need extending — not needed today.
+
+---
+
+# Decision #019
+
+## Booking Confirmation Uses Numbered-Slot Matching, Not Fuzzy Date/Time Parsing
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+Resolving which calendar slot a visitor picked, from free-text conversation, is the first feature in this project with a real, external, hard-to-undo side effect (an actual calendar event with a real attendee).
+
+### Decision
+
+Offered slots are numbered (1, 2, 3) when presented. scheduling/slot_matcher.py matches ONLY a standalone digit at a valid position or an ordinal word (first/second/third) — explicitly excluding multi-digit numbers and time-shaped tokens (e.g. "2pm") to avoid coincidental false positives. No match found means no booking attempt — never a guess.
+
+### Reasoning
+
+Fuzzy natural-language date/time matching is inherently ambiguous and this is the one place in the system where a wrong guess creates a real external artifact, not just a wrong sentence. Strict, narrow matching with a fail-safe "ask again" default was chosen deliberately over convenience.
+
+### Consequences
+
+**Benefits:** booking can only occur on an unambiguous visitor confirmation; a coincidental "2pm works" reply right after offering slot #2 is correctly NOT treated as selecting option 2 (caught and fixed during implementation).
+
+**Trade-offs:** visitors must reply with a number/ordinal, not natural phrasing like "the Tuesday one" — a real, deliberate UX constraint traded for booking safety.
+
+---
+
+# Decision #020
+
+## PlanningEngine Stays I/O-Free; Calendar Operations Live in ConversationEngine
+
+**Date**
+
+2026-07-26
+
+**Status**
+
+Accepted
+
+### Context
+
+PlanningEngine already produces a deterministic "drive_to_booking" signal. The question was whether calendar API calls (free/busy lookup, event creation) should live inside PlanningEngine itself.
+
+### Decision
+
+PlanningEngine was not modified at all (confirmed via empty git diff across every scheduling milestone). All calendar I/O lives in new ConversationEngine orchestration methods (_maybe_attach_availability, _maybe_resolve_booking), mirroring the existing _sync_lead_to_crm pattern — wrapped in try/except, logged on failure, never interrupting the conversation.
+
+### Reasoning
+
+PlanningEngine's own docstring is explicit that it only sequences signals already computed elsewhere and never touches external systems. Respecting that boundary kept this entire feature additive to ConversationEngine without touching the one component most central to the platform's deterministic-decision philosophy.
+
+### Consequences
+
+**Benefits:** PlanningEngine's test suite needed zero changes across the entire scheduling feature; the boundary between "decide" and "act" stayed clean.
+
+**Trade-offs:** none identified.
+
+---
+
 
 
 \# Future Decisions

@@ -30,13 +30,13 @@ Kaivix Core
 Kaivix Core is a reusable AI Employee platform designed to allow businesses to deploy intelligent AI Employees through configuration rather than custom software development.
 
 **Current Phase**
-AI Employee Version 1 — BusinessConfig Refactoring Backlog
+AI Employee Version 1 — Phase 2 (Production Hardening & Appointment Scheduling)
 
 **Current Milestone**
-BusinessConfig Refactoring Backlog — complete (7 of 7). Decision #014 (persona-fallback policy) resolved. Next: begin Phase 2 (Appointment Scheduling).
+Milestone 5 (Production Hardening & Appointment Scheduling) — complete. Next: a real end-to-end calendar connection + live booking verification, then continue Phase 2 (production testing, Docker deployment).
 
 **Overall Progress**
-🟩 7 of 7 BusinessConfig refactoring backlog items complete. This backlog was the prerequisite for the rest of AI Employee V1 (scheduling, calendar integration, deployment) — that work can now begin.
+🟩 BusinessConfig refactoring backlog complete (7/7). 🟩 Milestone 5 complete: the live pricing-leak bug is fixed, `ConversationMemory` now persists across restarts, a conversation-quality eval suite exists as a pre-deploy safety net, and the full Google Calendar scheduling feature (provider setup, real availability surfacing, real booking confirmation) is built and unit-tested end-to-end (93/93 tests passing). Not yet done: a real end-to-end booking test against a live calendar, and the remaining Phase 2 items (production testing, deployment).
 
 ---
 
@@ -52,8 +52,8 @@ BusinessConfig Refactoring Backlog — complete (7 of 7). Decision #014 (persona
 
 ## Memory
 - ✅ Memory Manager
-- ✅ Working Memory
-- ✅ Conversation Memory
+- ✅ Working Memory — now also tracks `offered_slots` (real calendar times most recently offered to a visitor), same explicit-setter pattern as `conversation_summary`
+- ✅ Conversation Memory — now persisted to SQLite (`memory/conversation_memory.db`), tenant-scoped from day one; survives a process restart (previously an in-memory `defaultdict`)
 - ✅ Conversation Summary
 - ✅ Long-Term Memory — now tenant-scoped: composite `(business_id, email)` key plus a real `business_id` column
 - ✅ Customer State
@@ -68,12 +68,22 @@ BusinessConfig Refactoring Backlog — complete (7 of 7). Decision #014 (persona
 - ✅ SQLite CRM — now tenant-scoped: `business_id` column, composite `UNIQUE(business_id, email)` constraint (previously unique on email alone, a real cross-tenant correctness bug)
 - ✅ Lead Storage
 
-## BusinessConfig (new since last status update)
+## BusinessConfig
 - ✅ BusinessConfig spec finalized (`docs/Business_Config.md`)
 - ✅ YAML file structure: one directory per business (`config/businesses/<id>/`), split across 8 files (identity, persona, qualification, knowledge, tools, channels, guardrails, providers)
 - ✅ Pydantic validation models + `BusinessConfigRepository` (`core_ai/business_config.py`)
 - ✅ Kaivix's own config populated, verified byte-identical to the previously hardcoded values it replaced
 - ✅ `DEFAULT_BUSINESS_ID = "kaivix"` seam adopted consistently across every refactored component
+
+## Conversation-Quality Eval Suite (new since last status update)
+- ✅ `evals/run_conversation_evals.py` — standalone, manually-run pre-deploy tool (deliberately not part of `python -m unittest discover -s tests`), runs scripted adversarial conversations against the real Groq LLM and checks for known-bad patterns (price leaks, bot admissions, crashes)
+
+## Google Calendar Integration (new since last status update)
+- ✅ Provider interface + tenant-scoped OAuth token storage (`scheduling/base_calendar_provider.py`, `scheduling/google_calendar_provider.py`, `scheduling/calendar_token_store.py`), one connection per business, shared app-level OAuth credentials
+- ✅ FastAPI OAuth router (`api/routers/calendar_oauth.py`), OAuth setup itself verified with a real browser consent flow
+- ✅ Real availability surfacing — `ConversationPlan.available_slots`, a read-only free/busy lookup triggered by PlanningEngine's existing `drive_to_booking` signal, surfaced in Bray's prompt
+- ✅ Real booking confirmation — numbered-slot matching (`scheduling/slot_matcher.py`, strict digit/ordinal only, never fuzzy) and real calendar event creation, with a Calendly-link fallback on no-match or API failure
+- ⬜ Real end-to-end booking test against a live calendar not yet performed (see Known Issues)
 
 ## Backend
 - ✅ FastAPI API
@@ -89,10 +99,12 @@ BusinessConfig Refactoring Backlog — complete (7 of 7). Decision #014 (persona
 # Currently In Progress
 
 **Current Focus**
-The BusinessConfig refactoring backlog is done (7 of 7 items complete). Decision #014 (docs/Decision_Log.md) is resolved — `persona.yaml` is now required per business, like `identity.yaml`, with no fallback to Kaivix's own persona. Current focus: begin Phase 2 of the roadmap (Appointment Scheduling).
+Milestone 5 (Production Hardening & Appointment Scheduling — docs/Milestone_Log.md) is complete: the live pricing-leak bug is fixed, `ConversationMemory` persists across restarts, a conversation-quality eval suite exists as a pre-deploy safety net, and the full Google Calendar scheduling feature is built and unit-tested end-to-end. Immediate focus: a real end-to-end calendar connection and live booking verification, before this feature reaches real site visitors. After that: continue Phase 2 (production testing, Docker deployment), or address the newly logged `BusinessConfig.tools.enabled_tools` gap.
 
 **Current Tasks**
-- Scope and begin Phase 2, Milestone: Appointment Scheduling
+- Real end-to-end calendar connection + live booking verification (`/oauth/google/connect`, a real conversation through to a real booked event, confirm and clean up)
+- Continue Phase 2: production testing, then Docker deployment
+- Address `BusinessConfig.tools.enabled_tools` gap (gate booking by config, not only by OAuth connection status)
 
 ---
 
@@ -112,11 +124,11 @@ Items:
 7. ✅ Dead-file cleanup (turned out to be a no-op — target files didn't exist)
 
 ## Milestone: Appointment Scheduling
-**Status:** Not Started
+**Status:** Built and unit-tested (Milestone 5) — real availability surfacing + numbered-slot booking confirmation
 **Priority:** High
 
 ## Milestone: Google Calendar Integration
-**Status:** Not Started
+**Status:** Built and unit-tested (Milestone 5) — provider, tenant-scoped OAuth token storage, OAuth router; real end-to-end live-calendar verification still pending
 **Priority:** High
 
 ## Milestone: Production Testing
@@ -149,11 +161,25 @@ Items:
 
 Backlog item #5 scoped `save_lead`, `get_lead_by_email`, `get_all_leads`, and `update_lead` to `business_id`, but `delete_lead` was explicitly left out of scope. Deleting by email alone could theoretically affect the wrong tenant's record once a second business exists. No impact today (single-business deployment).
 
+## Issue: BusinessConfig.tools.enabled_tools unused — calendar booking gated only by OAuth connection status
+**Status:** Open, flagged not fixed
+**Owner:** BusinessConfig / Scheduling
+**Priority:** Low
+
+`GoogleCalendarProvider.is_connected(business_id)` is the only gate on whether availability/booking is offered — `BusinessConfig.tools.enabled_tools` exists in the schema but nothing reads it to decide whether calendar booking should be available for a given business at all. No impact today (Kaivix is the only business and has calendar booking enabled by design); will matter once a business without calendar access exists.
+
+## Issue: Real end-to-end booking test against the live calendar not yet performed
+**Status:** Open, flagged not fixed
+**Owner:** Scheduling
+**Priority:** High — recommended before real site visitors reach this feature
+
+Every calendar/booking behavior is proven with mocked unit tests (Google API and LLM calls fully mocked, 93/93 passing); the OAuth setup itself was separately verified with a real browser consent flow (confirmed real calendars listed). A full, deliberate end-to-end run — connect a real calendar via `/oauth/google/connect`, complete a real conversation through to a real booked event on `brayiron@kaivixlab.com`'s calendar, confirm and clean up — has not yet been performed.
+
 ---
 
 # Current Technical Debt
 
-No significant technical debt beyond the two Known Issues above.
+No significant technical debt beyond the four Known Issues above.
 
 ---
 
@@ -191,7 +217,7 @@ Main
 # Project Goals
 
 **Immediate Goal**
-Begin Phase 2 of AI Employee Version 1 (Appointment Scheduling, Google Calendar Integration, Production Testing).
+Perform a real end-to-end calendar connection and live booking verification, then finish Phase 2 of AI Employee Version 1 (Production Testing, Docker Deployment).
 
 **Short-Term Goal**
 Begin customer outreach and secure the first paying client.
@@ -214,8 +240,8 @@ Version 1 is considered complete when the following are operational:
 - Lead qualification
 - CRM integration
 - Business configuration — backlog complete (7/7); Decision #014 (persona-fallback policy) resolved — `persona.yaml` required per business
-- Appointment scheduling
-- Google Calendar integration
+- Appointment scheduling — built and unit-tested (Milestone 5); live end-to-end verification pending
+- Google Calendar integration — built and unit-tested (Milestone 5); live end-to-end verification pending
 - Production testing
 - Stable deployment
 
@@ -237,13 +263,23 @@ Only after these requirements are satisfied should Version 1 be considered compl
 - Building item #6's cross-business test surfaced a real bug: `BusinessConfigRepository._get_default_sections()` crashed with an unhandled `pydantic.ValidationError` instead of a `BusinessConfigError` when Kaivix's own reference config was incomplete. Fixed as Decision #013. Also surfaced an open product question: whether a business with no `persona.yaml` should really inherit Bray's identity via fallback (Decision #014).
 - Decision #014 resolved: `persona.yaml` is now required per business, exactly like `identity.yaml` — no fallback to Kaivix's own persona exists anymore. `BusinessConfigRepository` fails loudly with a `BusinessConfigError` if a business's `persona.yaml` is missing. `_get_default_sections()` no longer builds a persona default at all.
 
+**2026-07-26 — Milestone 5: Production Hardening & Appointment Scheduling**
+
+- Production bug fix: real pricing figures removed from every document Bray can retrieve (`knowledge/kaivix/pricing.md` AND `knowledge/kaivix/objections.md` — the second found independently mid-fix). Real numbers moved to `docs/Internal_Pricing_Reference.md`, structurally unreachable by `KnowledgeBase`. Decision #016.
+- `ConversationMemory` made persistent: SQLite-backed (`memory/conversation_memory.db`), tenant-scoped from day one, replacing the in-memory `defaultdict` that lost all state on restart. Decision #015.
+- Conversation-quality eval suite added (`evals/run_conversation_evals.py`) — a standalone pre-deploy tool, deliberately kept out of the automated test suite, that runs scripted adversarial conversations against the real LLM and checks for known-bad patterns. Decision #017.
+- Google Calendar integration built in three stages: provider interface + tenant-scoped OAuth token storage (Decision #018), real read-only availability surfacing on top of PlanningEngine's existing `drive_to_booking` signal, and real booking confirmation via strict numbered-slot matching (Decision #019) and actual calendar event creation, with a Calendly-link fallback on no-match or API failure. `core_ai/planning_engine.py` was never touched across any of this (Decision #020, verified via empty git diff at every stage).
+- Suite grew from 33 to 93 tests across this milestone, all passing, zero real external calls in any automated test. OAuth setup itself was separately verified with a real browser consent flow (confirmed real calendars listed).
+
 Every milestone above: proven with a dedicated test (not just "it runs"), confirmed zero blast radius outside its named files via `git diff --stat`, and committed/pushed as an individual rollback checkpoint before the next milestone began.
 
 ---
 
 # Next Immediate Task
 
-Begin Phase 2 of the roadmap — Appointment Scheduling, then Google Calendar Integration, then Production Testing.
+Perform a real end-to-end calendar connection and live booking verification: connect via `/oauth/google/connect`, complete a real conversation through to a real booked event on `brayiron@kaivixlab.com`'s calendar, confirm and clean up. This is recommended before the scheduling feature reaches real site visitors.
+
+After that: continue Phase 2 of the roadmap — production testing, then Docker deployment — or address the newly logged `BusinessConfig.tools.enabled_tools` gap.
 
 ---
 

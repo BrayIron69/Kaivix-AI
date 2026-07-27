@@ -818,6 +818,90 @@ Resolve Decision #014, then begin Phase 2 (Appointment Scheduling).
 
 ---
 
+# Milestone 5
+
+## Production Hardening & Appointment Scheduling (Post-Backlog)
+
+**Status**
+
+Completed
+
+**Completion Date**
+
+2026-07-26
+
+---
+
+### Objective
+
+With the BusinessConfig backlog closed, address the highest-priority gaps identified in a full roadmap review (a live production bug, a missing safety net, and the next planned feature), then build the first real end-to-end feature on top of the now-complete tenant-scoped architecture: appointment scheduling with real Google Calendar booking.
+
+---
+
+### Work Completed
+
+- **Production bug fix**: real pricing figures removed from every document Bray can retrieve (knowledge/kaivix/pricing.md AND knowledge/kaivix/objections.md — the second found independently mid-fix, via the new test's own results). Real numbers moved to docs/Internal_Pricing_Reference.md, structurally unreachable by KnowledgeBase. PromptBuilder's pricing rule reworded to be business-agnostic.
+- **ConversationMemory persistence**: SQLite-backed, tenant-scoped from day one (memory/conversation_memory.db), replacing the in-memory defaultdict that lost all state on restart.
+- **Conversation-quality eval suite**: evals/run_conversation_evals.py, a standalone pre-deploy tool (not part of CI) that runs scripted adversarial conversations against the real LLM and checks for known-bad patterns (price leaks, bot admissions, crashes).
+- **Google Calendar integration, built in three stages**:
+  - Provider interface + tenant-scoped OAuth token storage (scheduling/base_calendar_provider.py, scheduling/google_calendar_provider.py, scheduling/calendar_token_store.py), plus a FastAPI OAuth router (api/routers/calendar_oauth.py).
+  - Real availability surfacing: PlanningEngine's existing "drive_to_booking" signal now triggers a real free/busy lookup, attached to the conversation plan and surfaced in Bray's prompt — read-only, no booking yet.
+  - Real booking confirmation: numbered-slot presentation, strict digit/ordinal matching (scheduling/slot_matcher.py), and actual calendar event creation on an unambiguous match, with a safe fallback (Calendly link) on no-match or API failure.
+
+---
+
+### Files Modified/Created
+
+core_ai/prompt_builder.py, knowledge/kaivix/pricing.md, knowledge/kaivix/objections.md, docs/Internal_Pricing_Reference.md (new), memory/conversation_memory.py, memory/conversation_store.py (new), core_ai/conversation_engine.py, core_ai/conversation_plan.py, core_ai/working_memory.py, evals/ (new directory), scheduling/ (new directory: base_calendar_provider.py, google_calendar_provider.py, calendar_token_store.py, slot_matcher.py), api/routers/calendar_oauth.py (new), api/main.py, scripts/verify_google_calendar.py (new, throwaway verification tool, left in place).
+
+---
+
+### Architecture Impact
+
+core_ai/planning_engine.py was never touched across any part of this milestone (verified via empty git diff at every stage) — the calendar feature is entirely additive at the ConversationEngine orchestration layer, preserving PlanningEngine's I/O-free boundary. Two new fields were added to ConversationPlan (available_slots, booking_confirmation, booking_failed), all purely additive with safe defaults, each proven byte-identical to prior prompt output when unset.
+
+---
+
+### Decisions Made
+
+Decision #015 — ConversationMemory persistence, SQLite, tenant-scoped from day one.
+Decision #016 — Pricing numbers removed structurally, not just by instruction.
+Decision #017 — Conversation-quality eval suite kept separate from CI.
+Decision #018 — Calendar OAuth: tenant-scoped tokens, shared app-level credentials.
+Decision #019 — Booking confirmation uses numbered-slot matching, not fuzzy parsing.
+Decision #020 — PlanningEngine stays I/O-free; calendar operations live in ConversationEngine.
+
+---
+
+### Testing
+
+Every sub-feature shipped with dedicated tests, growing the suite from 33 to 93 tests across this milestone, all passing, zero real external calls in any automated test (Google API and LLM calls are fully mocked; the eval suite that does call the real LLM is deliberately excluded from the automated suite). A real end-to-end run was performed for both the pricing fix (verified via the eval suite against the live LLM) and the Google Calendar OAuth setup (verified via a real browser consent flow, confirmed real calendars listed).
+
+---
+
+### Lessons Learned
+
+- Scoping a "fix pricing.md" task narrowly still surfaced a second, independent instance of the same bug in objections.md — worth grepping broadly for a pattern class before assuming a single-file fix is complete.
+- A coincidental false-positive ("2pm works" matching slot "#2") was caught during test-writing, not after — evidence that thorough test-first thinking on the highest-stakes feature paid off directly.
+- Real, deployed integrations (Google Calendar) have real-world setup friction (Workspace org policies, OAuth field validation errors) that no amount of code planning anticipates — these got resolved interactively as they came up, not pre-solved.
+
+---
+
+### Remaining Work
+
+- Known issue, still open: PlanningEngine._FIELD_QUESTIONS duplication.
+- Known issue, still open: CRM delete_lead not business_id-scoped.
+- New, not yet addressed: BusinessConfig.tools.enabled_tools remains unused — calendar booking is gated only by OAuth connection status, not by this config list.
+- A real, deliberate end-to-end booking test against the live brayiron@kaivixlab.com calendar (connect via /oauth/google/connect, complete a real conversation through to a real booked event, confirm and clean up) has not yet been performed — recommended before this is exposed to real site visitors.
+
+---
+
+### Next Milestone
+
+Real end-to-end calendar connection + live booking verification, then continue Phase 2 (remaining: production testing, Docker deployment) or address the newly logged tools.yaml gap.
+
+---
+
 
 
 \# Future Milestones
