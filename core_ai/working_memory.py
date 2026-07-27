@@ -52,6 +52,15 @@ class WorkingMemory:
     `ConversationSummary.build(...)` has computed the text —
     WorkingMemory does not build that narrative itself.
 
+    `offered_slots` follows the exact same pattern: `update()` never
+    touches it, and `set_offered_slots()` is the only other way anything
+    may write to it. It holds the real, human-readable calendar time
+    windows (e.g. "Tuesday 2:00 PM - 3:00 PM") that were most recently
+    offered to this visitor, so a later turn's numeric reply ("2", "the
+    second one") can be resolved back into an actual booking by
+    ConversationEngine — see `_maybe_attach_availability` (which sets it)
+    and `_maybe_resolve_booking` (which reads and clears it).
+
     PlanningEngine consumes this object (specifically
     `last_assistant_message` / `questions_answered`) instead of scanning
     raw history itself, so that history-scanning logic for "was this
@@ -80,6 +89,12 @@ class WorkingMemory:
         # See set_conversation_summary() and the `turn_count` property.
         self.conversation_summary: str = ""
         self.summary_last_updated_turn: int = 0
+
+        # Real calendar time windows most recently offered to this
+        # visitor (see set_offered_slots()). Not refreshed by update() --
+        # same "explicit setter only" pattern as conversation_summary
+        # above.
+        self.offered_slots: list[str] = []
 
         # Not one of the explicitly tracked fields, but needed by
         # PlanningEngine for repeat-question avoidance. Kept here so
@@ -158,6 +173,21 @@ class WorkingMemory:
         self.conversation_summary = summary_text or ""
         self.summary_last_updated_turn = self._turn_count
 
+    def set_offered_slots(self, slots: list[str]) -> None:
+        """
+        Store the real calendar time windows just offered to this
+        visitor onto this WorkingMemory instance.
+
+        This is the only way anything other than `update()` may write to
+        `offered_slots`, and it is only ever called by ConversationEngine
+        after `GoogleCalendarProvider.get_free_busy_slots(...)` (or its
+        structured equivalent) has computed the available windows —
+        WorkingMemory never looks up or formats calendar availability
+        itself, matching the "no duplicated business logic" rule the
+        rest of this class already follows.
+        """
+        self.offered_slots = list(slots or [])
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -224,4 +254,5 @@ class WorkingMemory:
             "summary": self.summary,
             "conversation_summary": self.conversation_summary,
             "summary_last_updated_turn": self.summary_last_updated_turn,
+            "offered_slots": list(self.offered_slots),
         }

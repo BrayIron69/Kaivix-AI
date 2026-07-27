@@ -270,7 +270,7 @@ class TestGoogleCalendarProviderSubtractBusy(unittest.TestCase):
         start = datetime(2026, 3, 10, 14, 0, tzinfo=UTC)  # a Tuesday
         end = datetime(2026, 3, 10, 15, 0, tzinfo=UTC)
 
-        formatted = GoogleCalendarProvider._format_slot(start, end)
+        formatted = GoogleCalendarProvider.format_slot(start, end)
         self.assertEqual(formatted, "Tuesday 2:00 PM - 3:00 PM")
 
 
@@ -369,6 +369,194 @@ class TestGoogleCalendarProviderFreeBusySlots(unittest.TestCase):
         )
 
         self.assertEqual(provider.get_free_busy_slots("business-a"), [])
+
+
+class TestGoogleCalendarProviderFreeBusyWindows(unittest.TestCase):
+    """
+    get_free_busy_windows() is the structured form get_free_busy_slots()
+    is now a thin formatting wrapper over -- ConversationEngine calls
+    this form directly so it can remember and later book the exact real
+    start/end datetimes, not just their display text. Same mocking
+    approach as TestGoogleCalendarProviderFreeBusySlots above.
+    """
+
+    _STORED_TOKEN = {
+        "business_id": "business-a",
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": SCOPES,
+    }
+
+    def test_returns_empty_list_when_calendar_not_connected(self):
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        self.assertEqual(provider.get_free_busy_windows("business-a"), [])
+
+    @patch("googleapiclient.discovery.build")
+    @patch("google.oauth2.credentials.Credentials")
+    def test_returns_real_datetime_tuples_when_no_busy_blocks(
+        self, mock_credentials_cls, mock_build
+    ):
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        mock_credentials = MagicMock()
+        mock_credentials.expired = False
+        mock_credentials_cls.return_value = mock_credentials
+
+        mock_service = MagicMock()
+        mock_service.freebusy().query().execute.return_value = {
+            "calendars": {"primary": {"busy": []}}
+        }
+        mock_build.return_value = mock_service
+
+        provider = _make_provider(token_store=token_store)
+        windows = provider.get_free_busy_windows("business-a")
+
+        self.assertGreater(len(windows), 0)
+        self.assertLessEqual(len(windows), 3)
+        for start, end in windows:
+            self.assertIsInstance(start, datetime)
+            self.assertIsInstance(end, datetime)
+            self.assertLess(start, end)
+
+        # get_free_busy_slots' formatted strings must be exactly
+        # format_slot() applied to these same windows -- proves the two
+        # methods share one computation, not two independent ones that
+        # could drift apart.
+        slots = provider.get_free_busy_slots("business-a")
+        self.assertEqual(
+            slots, [GoogleCalendarProvider.format_slot(start, end) for start, end in windows]
+        )
+
+
+class TestGoogleCalendarProviderCreateEvent(unittest.TestCase):
+    """
+    Exercises create_event() with Credentials and
+    googleapiclient.discovery.build entirely mocked -- this suite must
+    NEVER create a real calendar event.
+    """
+
+    _STORED_TOKEN = {
+        "business_id": "business-a",
+        "token": "access-token",
+        "refresh_token": "refresh-token",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "scopes": SCOPES,
+    }
+
+    _START = datetime(2026, 3, 10, 14, 0, tzinfo=UTC)
+    _END = datetime(2026, 3, 10, 15, 0, tzinfo=UTC)
+
+    @patch("googleapiclient.discovery.build")
+    @patch("google.oauth2.credentials.Credentials")
+    def test_create_event_success_returns_event_link(self, mock_credentials_cls, mock_build):
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        mock_credentials = MagicMock()
+        mock_credentials.expired = False
+        mock_credentials_cls.return_value = mock_credentials
+
+        mock_service = MagicMock()
+        mock_service.events().insert().execute.return_value = {
+            "htmlLink": "https://calendar.google.com/event?eid=abc123"
+        }
+        mock_build.return_value = mock_service
+
+        provider = _make_provider(token_store=token_store)
+        result = provider.create_event(
+            "business-a",
+            summary="Kaivix Demo Call - Alice",
+            start_time=self._START,
+            end_time=self._END,
+            attendee_email="alice@example.com",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "success": True,
+                "event_link": "https://calendar.google.com/event?eid=abc123",
+                "error": None,
+            },
+        )
+
+        _args, insert_kwargs = mock_service.events().insert.call_args
+        self.assertEqual(insert_kwargs["calendarId"], "primary")
+        self.assertEqual(
+            insert_kwargs["body"]["attendees"], [{"email": "alice@example.com"}]
+        )
+
+    def test_create_event_returns_failure_dict_when_not_connected(self):
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        result = provider.create_event(
+            "business-never-connected",
+            summary="Demo",
+            start_time=self._START,
+            end_time=self._END,
+            attendee_email="alice@example.com",
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["event_link"])
+        self.assertIn("business-never-connected", result["error"])
+
+    @patch("googleapiclient.discovery.build")
+    @patch("google.oauth2.credentials.Credentials")
+    def test_create_event_never_raises_on_api_failure(self, mock_credentials_cls, mock_build):
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        mock_credentials = MagicMock()
+        mock_credentials.expired = False
+        mock_credentials_cls.return_value = mock_credentials
+
+        mock_service = MagicMock()
+        mock_service.events().insert().execute.side_effect = RuntimeError(
+            "Google Calendar API is down"
+        )
+        mock_build.return_value = mock_service
+
+        provider = _make_provider(token_store=token_store)
+
+        try:
+            result = provider.create_event(
+                "business-a",
+                summary="Demo",
+                start_time=self._START,
+                end_time=self._END,
+                attendee_email="alice@example.com",
+            )
+        except Exception as exc:  # pragma: no cover -- the assertion below is the real point
+            self.fail(f"create_event raised {exc!r} instead of returning a failure dict")
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["event_link"])
+        self.assertIn("Google Calendar API is down", result["error"])
+
+    def test_create_event_returns_failure_dict_when_times_missing(self):
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        provider = _make_provider(token_store=token_store)
+        result = provider.create_event(
+            "business-a",
+            summary="Demo",
+            start_time=None,
+            end_time=None,
+            attendee_email="alice@example.com",
+        )
+
+        self.assertFalse(result["success"])
+        self.assertIsNone(result["event_link"])
+        self.assertIsNotNone(result["error"])
 
 
 if __name__ == "__main__":

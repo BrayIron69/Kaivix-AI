@@ -33,5 +33,24 @@ class ConversationPlan:
     # calendar -- i.e. empty for every plan today.
     available_slots: List[str] = field(default_factory=list)
 
+    # Populated only by ConversationEngine._maybe_resolve_booking, after
+    # PlanningEngine has already returned its plan -- same pattern as
+    # available_slots above; PlanningEngine never sets either. Set to the
+    # exact matched slot's display text (e.g. "Tuesday 2:00 PM - 3:00 PM")
+    # when a visitor's reply was just resolved into a real calendar
+    # booking this turn, so PromptBuilder can have Bray confirm that
+    # EXACT text back verbatim rather than risk the LLM paraphrasing (and
+    # potentially misstating) the confirmed time. Empty otherwise.
+    booking_confirmation: str = ""
+
+    # Companion to booking_confirmation: true when a visitor's reply
+    # matched an offered slot but the actual calendar booking attempt
+    # failed (GoogleCalendarProvider.create_event returned
+    # success=False), so PromptBuilder can have Bray apologize and offer
+    # the existing Calendly link as a fallback instead of silently
+    # dropping the booking. False otherwise -- and never true at the
+    # same time as a non-empty booking_confirmation.
+    booking_failed: bool = False
+
     def to_dict(self) -> dict:
         return asdict(self)

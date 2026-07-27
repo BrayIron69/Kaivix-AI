@@ -177,10 +177,33 @@ class GoogleCalendarProvider(BaseCalendarProvider):
     def get_free_busy_slots(
         self, business_id: str = DEFAULT_BUSINESS_ID, days_ahead: int = 7
     ) -> list[str]:
-        # Contract (see BaseCalendarProvider): never raise, always return
-        # a list -- an empty one whenever the calendar isn't connected or
-        # anything about the lookup fails, so callers can treat this as
-        # "nothing to offer right now" without special-casing failures.
+        """
+        Human-readable formatting of get_free_busy_windows() below --
+        kept as its own method (rather than having callers format windows
+        themselves) since PromptBuilder/ConversationPlan only ever need
+        the display strings, not the underlying datetimes.
+        """
+        windows = self.get_free_busy_windows(business_id, days_ahead)
+        return [self.format_slot(start, end) for start, end in windows]
+
+    def get_free_busy_windows(
+        self, business_id: str = DEFAULT_BUSINESS_ID, days_ahead: int = 7
+    ) -> list[tuple[datetime, datetime]]:
+        """
+        The structured (start, end) datetime pairs behind
+        get_free_busy_slots()'s display strings. ConversationEngine uses
+        this form (not get_free_busy_slots()'s formatted text) to
+        remember exactly which real time window a visitor picked, so
+        booking it later never depends on re-parsing a display string
+        like "Tuesday 2:00 PM - 3:00 PM" back into a date -- an
+        inherently ambiguous operation once more than a few days have
+        passed (which Tuesday?).
+
+        Contract (see BaseCalendarProvider): never raise, always return a
+        list -- an empty one whenever the calendar isn't connected or
+        anything about the lookup fails, so callers can treat this as
+        "nothing to offer right now" without special-casing failures.
+        """
         try:
             credentials = self._load_credentials(business_id)
             if credentials is None:
@@ -231,12 +254,78 @@ class GoogleCalendarProvider(BaseCalendarProvider):
                 if len(open_slots) >= _MAX_RETURNED_SLOTS:
                     break
 
-            return [
-                self._format_slot(start, end) for start, end in open_slots[:_MAX_RETURNED_SLOTS]
-            ]
+            return open_slots[:_MAX_RETURNED_SLOTS]
 
         except Exception:
             return []
+
+    def create_event(
+        self,
+        business_id: str = DEFAULT_BUSINESS_ID,
+        summary: str = "",
+        start_time: datetime = None,
+        end_time: datetime = None,
+        attendee_email: str = "",
+    ) -> dict:
+        """
+        Create a real calendar event on the business's connected primary
+        calendar, with `attendee_email` invited. Uses the
+        calendar.events scope already granted at connection time -- no
+        new consent needed.
+
+        Never raises: any failure (not connected, malformed times, the
+        API call itself failing) is caught and reported in the returned
+        dict instead, since callers need to distinguish "nothing to book"
+        from "tried to book and it failed" -- two very different
+        outcomes for a real, hard-to-undo side effect like this one.
+
+        Returns {"success": bool, "event_link": str | None, "error": str | None}.
+        """
+        try:
+            credentials = self._load_credentials(business_id)
+            if credentials is None:
+                return {
+                    "success": False,
+                    "event_link": None,
+                    "error": f"No calendar connection stored for business_id={business_id!r}.",
+                }
+
+            if start_time is None or end_time is None:
+                return {
+                    "success": False,
+                    "event_link": None,
+                    "error": "start_time and end_time are required.",
+                }
+
+            from googleapiclient.discovery import build
+
+            service = build("calendar", "v3", credentials=credentials, static_discovery=True)
+            event_body = {
+                "summary": summary,
+                "start": {"dateTime": start_time.isoformat()},
+                "end": {"dateTime": end_time.isoformat()},
+            }
+            if attendee_email:
+                event_body["attendees"] = [{"email": attendee_email}]
+
+            created_event = (
+                service.events()
+                .insert(calendarId="primary", body=event_body, sendUpdates="all")
+                .execute()
+            )
+
+            return {
+                "success": True,
+                "event_link": created_event.get("htmlLink"),
+                "error": None,
+            }
+
+        except Exception as error:
+            return {
+                "success": False,
+                "event_link": None,
+                "error": str(error),
+            }
 
     # ------------------------------------------------------------------
     # get_free_busy_slots internals
@@ -298,7 +387,7 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         return open_slots
 
     @staticmethod
-    def _format_slot(start: datetime, end: datetime) -> str:
+    def format_slot(start: datetime, end: datetime) -> str:
         weekday = start.strftime("%A")
         start_str = start.strftime("%I:%M %p").lstrip("0")
         end_str = end.strftime("%I:%M %p").lstrip("0")

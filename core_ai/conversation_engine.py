@@ -19,6 +19,7 @@ from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
 from core_ai.working_memory import WorkingMemory
 from scheduling.google_calendar_provider import GoogleCalendarProvider
+from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
 from utils.logger import Logger
 
@@ -111,6 +112,17 @@ class ConversationEngine:
         # Persistent lead state per conversation.
         self._lead_profiles: dict[str, LeadProfile] = {}
 
+        # Structured (start, end) datetime pairs behind the display
+        # strings most recently offered to each conversation (see
+        # _maybe_attach_availability), keyed by conversation_id. Kept
+        # separately from WorkingMemory.offered_slots (which only ever
+        # holds the display strings -- see its docstring) so
+        # _maybe_resolve_booking can book the exact real time window that
+        # was actually shown to the visitor, without re-parsing display
+        # text back into a date -- inherently ambiguous once more than a
+        # few days have passed (which Tuesday?).
+        self._offered_slot_windows: dict[str, list[tuple]] = {}
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -155,6 +167,19 @@ class ConversationEngine:
             history=history,
         )
 
+        # Resolves a visitor's reply (e.g. "2", "the second one") into a
+        # real calendar booking, when a previous turn offered real
+        # available time slots (working_memory.offered_slots). Placed
+        # right after working_memory is refreshed, independent of
+        # intent/stage/goal -- it only needs working_memory, lead, and
+        # this turn's raw user_message. Returns None when there is
+        # nothing to resolve this turn (no offered slots, or no clear
+        # match), in which case working_memory.offered_slots is left
+        # untouched so a later turn can still match it.
+        booking_result = self._maybe_resolve_booking(
+            conversation_id, user_message, lead, working_memory
+        )
+
         # Refreshed only every `_summary_refresh_interval_turns` turns
         # (not every turn like working_memory above). The result is
         # stored directly onto `working_memory` by MemoryManager, so
@@ -179,12 +204,25 @@ class ConversationEngine:
             working_memory=working_memory,
         )
 
-        # Read-only: attaches real calendar availability to the plan when
-        # PlanningEngine has already decided to drive toward booking and
-        # this business has a connected calendar. PlanningEngine itself
-        # performs no I/O (see its docstring) -- this lookup belongs here,
-        # one step after the plan is produced, not inside PlanningEngine.
-        plan = self._maybe_attach_availability(conversation_id, plan)
+        if booking_result is not None:
+            # A booking was just confirmed or failed this turn --
+            # PlanningEngine itself never sets these fields (it performs
+            # no I/O; see its docstring). Skip _maybe_attach_availability
+            # below: a booking resolution and a brand-new availability
+            # offer should never both fire in the same turn.
+            plan = replace(
+                plan,
+                booking_confirmation=booking_result["confirmation"],
+                booking_failed=booking_result["failed"],
+            )
+        else:
+            # Read-only: attaches real calendar availability to the plan
+            # when PlanningEngine has already decided to drive toward
+            # booking and this business has a connected calendar.
+            # PlanningEngine itself performs no I/O (see its docstring)
+            # -- this lookup belongs here, one step after the plan is
+            # produced, not inside PlanningEngine.
+            plan = self._maybe_attach_availability(conversation_id, plan, working_memory)
 
         knowledge = self._gather_knowledge(conversation_id, user_message)
 
@@ -353,7 +391,10 @@ class ConversationEngine:
     # ------------------------------------------------------------------
 
     def _maybe_attach_availability(
-        self, conversation_id: str, plan: ConversationPlan
+        self,
+        conversation_id: str,
+        plan: ConversationPlan,
+        working_memory: WorkingMemory,
     ) -> ConversationPlan:
         """
         When PlanningEngine has decided to drive toward booking
@@ -362,6 +403,13 @@ class ConversationEngine:
         the plan so PromptBuilder can have Bray offer them naturally
         instead of a vague "let's book a call." Read-only -- never
         creates or modifies an event.
+
+        Also remembers what was offered: the display strings are written
+        onto `working_memory` (set_offered_slots) and the underlying
+        structured (start, end) datetimes are cached in
+        self._offered_slot_windows, keyed by conversation_id, so a later
+        turn's numeric reply can be resolved back into a real booking by
+        _maybe_resolve_booking without ever re-parsing display text.
 
         Mirrors _sync_lead_to_crm's error-handling contract: calendar
         failures are logged and the original plan is returned unchanged,
@@ -376,7 +424,12 @@ class ConversationEngine:
             if not self.calendar_provider.is_connected(self.business_id):
                 return plan
 
-            slots = self.calendar_provider.get_free_busy_slots(self.business_id)
+            windows = self.calendar_provider.get_free_busy_windows(self.business_id)
+            slots = [self.calendar_provider.format_slot(start, end) for start, end in windows]
+
+            self._offered_slot_windows[conversation_id] = windows
+            working_memory.set_offered_slots(slots)
+
             return replace(plan, available_slots=slots)
         except Exception as error:
             self.logger.error(
@@ -384,6 +437,86 @@ class ConversationEngine:
                 f"(conversation_id={conversation_id}): {error}"
             )
             return plan
+
+    def _maybe_resolve_booking(
+        self,
+        conversation_id: str,
+        user_message: str,
+        lead: LeadProfile,
+        working_memory: WorkingMemory,
+    ) -> Optional[dict]:
+        """
+        Attempt to resolve a visitor's reply into a real calendar
+        booking, when a previous turn offered real available time slots
+        (working_memory.offered_slots, set by _maybe_attach_availability
+        above).
+
+        Returns None when there is nothing to resolve this turn (no
+        offered slots, or the message doesn't clearly match one of them)
+        -- working_memory.offered_slots is left untouched in that case,
+        so a later turn can still match it. Otherwise returns
+        {"confirmation": str, "failed": bool} describing the outcome,
+        for process_message to attach to this turn's ConversationPlan.
+
+        This is the one place in the pipeline with a real, external,
+        hard-to-undo side effect (creating an actual calendar event) --
+        mirrors _sync_lead_to_crm's error-handling contract regardless:
+        failures are logged and never raise past this method, degrading
+        to "nothing resolved" rather than breaking the turn.
+        """
+        try:
+            offered_slots = list(working_memory.offered_slots or [])
+            if not offered_slots:
+                return None
+
+            matched_index = match_offered_slot(user_message, offered_slots)
+            if matched_index is None:
+                return None
+
+            matched_slot_text = offered_slots[matched_index]
+            windows = self._offered_slot_windows.get(conversation_id) or []
+
+            if matched_index >= len(windows):
+                # Matched a display string but have no structured
+                # start/end to actually book (e.g. stale/desynced cache)
+                # -- fail safely rather than guess a time.
+                self.logger.error(
+                    f"[GoogleCalendarProvider] Matched offered slot "
+                    f"{matched_index} but no cached start/end window "
+                    f"available (conversation_id={conversation_id})"
+                )
+                working_memory.set_offered_slots([])
+                self._offered_slot_windows.pop(conversation_id, None)
+                return {"confirmation": "", "failed": True}
+
+            start_time, end_time = windows[matched_index]
+
+            result = self.calendar_provider.create_event(
+                self.business_id,
+                summary=f"Kaivix Demo Call - {lead.name or lead.email}",
+                start_time=start_time,
+                end_time=end_time,
+                attendee_email=lead.email,
+            )
+
+            working_memory.set_offered_slots([])
+            self._offered_slot_windows.pop(conversation_id, None)
+
+            if result.get("success"):
+                return {"confirmation": matched_slot_text, "failed": False}
+
+            self.logger.error(
+                f"[GoogleCalendarProvider] Booking attempt failed "
+                f"(conversation_id={conversation_id}): {result.get('error')}"
+            )
+            return {"confirmation": "", "failed": True}
+
+        except Exception as error:
+            self.logger.error(
+                f"[GoogleCalendarProvider] Failed to resolve booking "
+                f"(conversation_id={conversation_id}): {error}"
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Knowledge & qualification

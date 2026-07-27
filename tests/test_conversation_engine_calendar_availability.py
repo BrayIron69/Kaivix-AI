@@ -1,12 +1,18 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import crm.database as crm_database
 import memory.long_term_memory as ltm_module
 from core_ai.conversation_engine import ConversationEngine
 from core_ai.conversation_plan import ConversationPlan
+from core_ai.working_memory import WorkingMemory
+from scheduling.google_calendar_provider import GoogleCalendarProvider
+
+UTC = ZoneInfo("UTC")
 
 
 class _IsolatedDatabasesMixin:
@@ -49,6 +55,11 @@ class TestMaybeAttachAvailability(_IsolatedDatabasesMixin, unittest.TestCase):
     isolation.
     """
 
+    _WINDOWS = [
+        (datetime(2026, 3, 10, 14, 0, tzinfo=UTC), datetime(2026, 3, 10, 15, 0, tzinfo=UTC)),
+        (datetime(2026, 3, 11, 10, 0, tzinfo=UTC), datetime(2026, 3, 11, 11, 0, tzinfo=UTC)),
+    ]
+
     def setUp(self):
         self._isolate_databases()
         self.engine = ConversationEngine()
@@ -56,22 +67,21 @@ class TestMaybeAttachAvailability(_IsolatedDatabasesMixin, unittest.TestCase):
         # test_conversation_engine_business_config.py uses for engine.llm
         # -- avoids ever touching the real scheduling/calendar_tokens.db.
         self.engine.calendar_provider = MagicMock()
+        self.engine.calendar_provider.format_slot.side_effect = GoogleCalendarProvider.format_slot
+        self.working_memory = WorkingMemory()
 
     def test_fires_when_strategy_is_drive_to_booking_and_connected(self):
         self.engine.calendar_provider.is_connected.return_value = True
-        self.engine.calendar_provider.get_free_busy_slots.return_value = [
-            "Tuesday 2:00 PM - 3:00 PM",
-            "Wednesday 10:00 AM - 11:00 AM",
-        ]
+        self.engine.calendar_provider.get_free_busy_windows.return_value = self._WINDOWS
 
         plan = ConversationPlan(strategy="drive_to_booking")
-        result = self.engine._maybe_attach_availability("conv-1", plan)
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
 
         self.assertEqual(
             result.available_slots,
             ["Tuesday 2:00 PM - 3:00 PM", "Wednesday 10:00 AM - 11:00 AM"],
         )
-        self.engine.calendar_provider.get_free_busy_slots.assert_called_once_with(
+        self.engine.calendar_provider.get_free_busy_windows.assert_called_once_with(
             self.engine.business_id
         )
 
@@ -79,51 +89,63 @@ class TestMaybeAttachAvailability(_IsolatedDatabasesMixin, unittest.TestCase):
         self.assertEqual(plan.available_slots, [])
         self.assertIsNot(result, plan)
 
+        # The exact same display strings are remembered onto
+        # working_memory, and the structured windows cached for later
+        # booking resolution -- see _maybe_resolve_booking.
+        self.assertEqual(
+            self.working_memory.offered_slots,
+            ["Tuesday 2:00 PM - 3:00 PM", "Wednesday 10:00 AM - 11:00 AM"],
+        )
+        self.assertEqual(self.engine._offered_slot_windows["conv-1"], self._WINDOWS)
+
     def test_skipped_when_strategy_is_not_drive_to_booking(self):
         self.engine.calendar_provider.is_connected.return_value = True
 
         plan = ConversationPlan(strategy="continue_discovery")
-        result = self.engine._maybe_attach_availability("conv-1", plan)
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
 
         self.assertIs(result, plan)
         self.assertEqual(result.available_slots, [])
         self.engine.calendar_provider.is_connected.assert_not_called()
-        self.engine.calendar_provider.get_free_busy_slots.assert_not_called()
+        self.engine.calendar_provider.get_free_busy_windows.assert_not_called()
+        self.assertEqual(self.working_memory.offered_slots, [])
 
     def test_skipped_when_strategy_matches_but_not_connected(self):
         self.engine.calendar_provider.is_connected.return_value = False
 
         plan = ConversationPlan(strategy="drive_to_booking")
-        result = self.engine._maybe_attach_availability("conv-1", plan)
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
 
         self.assertIs(result, plan)
         self.assertEqual(result.available_slots, [])
         self.engine.calendar_provider.is_connected.assert_called_once_with(
             self.engine.business_id
         )
-        self.engine.calendar_provider.get_free_busy_slots.assert_not_called()
+        self.engine.calendar_provider.get_free_busy_windows.assert_not_called()
+        self.assertEqual(self.working_memory.offered_slots, [])
 
     def test_calendar_exception_is_caught_and_logged_not_raised(self):
         self.engine.calendar_provider.is_connected.return_value = True
-        self.engine.calendar_provider.get_free_busy_slots.side_effect = RuntimeError(
+        self.engine.calendar_provider.get_free_busy_windows.side_effect = RuntimeError(
             "Google API exploded"
         )
         self.engine.logger = MagicMock()
 
         plan = ConversationPlan(strategy="drive_to_booking")
-        result = self.engine._maybe_attach_availability("conv-1", plan)
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
 
         self.assertIs(result, plan)
         self.assertEqual(result.available_slots, [])
         self.engine.logger.error.assert_called_once()
         self.assertIn("conv-1", self.engine.logger.error.call_args[0][0])
+        self.assertEqual(self.working_memory.offered_slots, [])
 
     def test_is_connected_exception_is_also_caught(self):
         self.engine.calendar_provider.is_connected.side_effect = RuntimeError("boom")
         self.engine.logger = MagicMock()
 
         plan = ConversationPlan(strategy="drive_to_booking")
-        result = self.engine._maybe_attach_availability("conv-1", plan)
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
 
         self.assertIs(result, plan)
         self.assertEqual(result.available_slots, [])

@@ -1,0 +1,109 @@
+import unittest
+from types import SimpleNamespace
+
+from core_ai.conversation_plan import ConversationPlan
+from core_ai.prompt_builder import PromptBuilder
+
+
+class TestPromptBuilderBookingSections(unittest.TestCase):
+    """
+    Proves plan.booking_confirmation / plan.booking_failed are purely
+    additive to PromptBuilder's output: byte-identical when both are at
+    their default (empty string / False), and correctly rendered when
+    populated. Same discipline as test_prompt_builder_availability.py.
+    """
+
+    STAGE = "closing"
+    INTENT = "buying_signal"
+    GOAL = "book_demo"
+    KNOWLEDGE = ""
+
+    def _build(self, plan) -> str:
+        return PromptBuilder().build(
+            stage=self.STAGE,
+            intent=self.INTENT,
+            goal=self.GOAL,
+            knowledge=self.KNOWLEDGE,
+            plan=plan,
+        )
+
+    def test_default_booking_fields_produce_byte_identical_output(self):
+        plan_with_fields = ConversationPlan(
+            strategy="drive_to_booking",
+            next_question="Ask if they'd like to book a free demo call and offer a time.",
+            avoid_topics=[],
+            booking_confirmation="",
+            booking_failed=False,
+        )
+
+        # A plan-like object with neither attribute at all -- simulates
+        # exactly what every plan looked like before these fields
+        # existed. PromptBuilder reads them via getattr(..., "") or ""
+        # / bool(getattr(..., False)), so both must produce identical
+        # output.
+        plan_without_fields = SimpleNamespace(
+            strategy="drive_to_booking",
+            next_question="Ask if they'd like to book a free demo call and offer a time.",
+            avoid_topics=[],
+        )
+
+        output_with_fields = self._build(plan_with_fields)
+        output_without_fields = self._build(plan_without_fields)
+
+        self.assertEqual(output_with_fields, output_without_fields)
+        self.assertNotIn("BOOKING CONFIRMED", output_with_fields)
+        self.assertNotIn("BOOKING SYSTEM ERROR", output_with_fields)
+
+    def test_booking_confirmation_is_narrated_for_verbatim_confirmation(self):
+        plan = ConversationPlan(
+            strategy="drive_to_booking",
+            booking_confirmation="Wednesday 10:00 AM - 11:00 AM",
+        )
+
+        output = self._build(plan)
+
+        self.assertIn("BOOKING CONFIRMED", output)
+        self.assertIn('"Wednesday 10:00 AM - 11:00 AM"', output)
+        self.assertIn("do not", output)
+        self.assertIn("paraphrase", output)
+        self.assertNotIn("BOOKING SYSTEM ERROR", output)
+
+    def test_booking_failed_is_narrated_with_calendly_fallback(self):
+        plan = ConversationPlan(
+            strategy="drive_to_booking",
+            booking_failed=True,
+        )
+
+        output = self._build(plan)
+
+        self.assertIn("BOOKING SYSTEM ERROR", output)
+        self.assertIn("apologize", output.lower())
+        # Kaivix's own persona.booking_link, resolved via the default
+        # BusinessConfig this build() call falls back to.
+        self.assertIn("calendly.com", output)
+        self.assertNotIn("BOOKING CONFIRMED", output)
+
+    def test_booking_confirmation_and_failed_can_both_appear_if_both_set(self):
+        # Not a state ConversationEngine ever actually produces (see
+        # ConversationPlan's docstring), but PromptBuilder itself makes
+        # no assumption the two are mutually exclusive -- each section
+        # is independently gated on its own field.
+        plan = ConversationPlan(
+            strategy="drive_to_booking",
+            booking_confirmation="Tuesday 2:00 PM - 3:00 PM",
+            booking_failed=True,
+        )
+
+        output = self._build(plan)
+
+        self.assertIn("BOOKING CONFIRMED", output)
+        self.assertIn("BOOKING SYSTEM ERROR", output)
+
+    def test_no_plan_at_all_is_unaffected(self):
+        output = self._build(None)
+        self.assertNotIn("BOOKING CONFIRMED", output)
+        self.assertNotIn("BOOKING SYSTEM ERROR", output)
+
+
+if __name__ == "__main__":
+    unittest.main()

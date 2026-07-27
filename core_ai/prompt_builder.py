@@ -207,6 +207,28 @@ RULES:
                     *[f"- {slot}" for slot in plan_available_slots],
                 ]
 
+            plan_booking_confirmation = getattr(plan, "booking_confirmation", "") or ""
+            if plan_booking_confirmation:
+                sections += [
+                    "",
+                    "BOOKING CONFIRMED:",
+                    f'A real calendar event was just created for: "{plan_booking_confirmation}".',
+                    "Confirm this EXACT time back to the visitor, word for word — do not "
+                    "paraphrase, reconstruct, or restate it in your own words, to avoid "
+                    "confirming the wrong time.",
+                ]
+
+            plan_booking_failed = bool(getattr(plan, "booking_failed", False))
+            if plan_booking_failed:
+                booking_link = business_config.persona.booking_link or ""
+                sections += [
+                    "",
+                    "BOOKING SYSTEM ERROR:",
+                    "The calendar booking attempt just failed. Apologize briefly for the "
+                    "technical issue, then offer this booking link as a fallback instead: "
+                    f"{booking_link}",
+                ]
+
         sections += [
             "",
             self.ENGINE_RULES.format(
