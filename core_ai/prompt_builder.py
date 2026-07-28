@@ -219,10 +219,13 @@ RULES:
                 sections += [
                     "",
                     "BOOKING CONFIRMED:",
-                    f'A real calendar event was just created for: "{plan_booking_confirmation}".',
-                    "Confirm this EXACT time back to the visitor, word for word — do not "
-                    "paraphrase, reconstruct, or restate it in your own words, to avoid "
-                    "confirming the wrong time.",
+                    f"Confirmed time: {plan_booking_confirmation}",
+                    "Tell the visitor their booking is confirmed, in your own natural, "
+                    "friendly words — the way a real person would say it, not a system "
+                    "message. You must state the confirmed time correctly and exactly as "
+                    "given above, but do not copy this label format or this instruction's "
+                    "sentence structure into your reply. Mention that a calendar invite/"
+                    "confirmation will be sent to their email.",
                 ]
 
             plan_booking_failed = bool(getattr(plan, "booking_failed", False))

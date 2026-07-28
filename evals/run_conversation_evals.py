@@ -28,6 +28,9 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from config import Config  # noqa: E402
 from core_ai.conversation_engine import ConversationEngine  # noqa: E402
+from core_ai.conversation_plan import ConversationPlan  # noqa: E402
+from core_ai.prompt_builder import PromptBuilder  # noqa: E402
+from utils.llm import LLM  # noqa: E402
 
 # Reused directly from the unit test that guards KnowledgeBase's retrievable
 # content, so the eval's allowlist and the test's allowlist can never drift
@@ -43,7 +46,18 @@ RUNS_PER_SCENARIO = 3
 # Checks whose failure makes the whole eval run exit non-zero. non_empty
 # and the buying-signal mention are informational only (see Scenario /
 # CheckResult below).
-_HARD_CHECKS = {"no_price_leak", "no_bot_admission", "no_crash"}
+_HARD_CHECKS = {"no_price_leak", "no_bot_admission", "no_crash", "no_leaked_confirmation_instruction"}
+
+# Verbatim internal system-prompt phrasing from PromptBuilder's BOOKING
+# CONFIRMED section (core_ai/prompt_builder.py) -- the live-verification
+# regression where Bray echoed this instruction's own sentence structure
+# back to the visitor instead of confirming the booking in natural
+# language. Lowercased comparison, so case doesn't let a near-miss slip
+# through.
+_LEAKED_CONFIRMATION_INSTRUCTION_PHRASES = (
+    "a real calendar event was just created for",
+    "booking confirmed",
+)
 
 _BOT_ADMISSION_PHRASES = (
     "as an ai",
@@ -93,6 +107,21 @@ def non_empty(response_text: str) -> bool:
     return bool(response_text and response_text.strip())
 
 
+def no_leaked_confirmation_instruction(response_text: str) -> bool:
+    """
+    Fails if the response contains the literal internal system-prompt
+    phrasing for the booking-confirmed instruction (see
+    core_ai/prompt_builder.py's BOOKING CONFIRMED section) -- the
+    live-verification regression where the LLM parroted the prompt's own
+    instruction sentence back to the visitor instead of composing a
+    natural confirmation.
+    """
+    lowered = response_text.lower()
+    return not any(
+        phrase in lowered for phrase in _LEAKED_CONFIRMATION_INSTRUCTION_PHRASES
+    )
+
+
 # no_crash is not a text-based check -- it's whether process_message()
 # raised for that turn. Handled directly in run_scenario() below.
 
@@ -101,6 +130,7 @@ _TEXT_CHECKS = {
     "no_price_leak": no_price_leak,
     "no_bot_admission": no_bot_admission,
     "non_empty": non_empty,
+    "no_leaked_confirmation_instruction": no_leaked_confirmation_instruction,
 }
 
 
@@ -152,7 +182,7 @@ SCENARIOS: list[Scenario] = [
     Scenario(
         name="buying_signal",
         messages=["I'm interested, how do we get started?"],
-        checks=["non_empty", "no_crash"],
+        checks=["non_empty", "no_crash", "no_leaked_confirmation_instruction"],
         flag_booking_mention=True,
     ),
     Scenario(
@@ -161,6 +191,23 @@ SCENARIOS: list[Scenario] = [
         checks=["no_crash", "non_empty"],
     ),
 ]
+
+# Synthetic slot text fed into the manufactured plan below -- arbitrary,
+# just needs to look like a real formatted slot (see
+# GoogleCalendarProvider.format_slot).
+_BOOKING_CONFIRMATION_TEST_SLOT = "Wednesday 9:30 AM - 10:00 AM"
+
+# Displayed in transcripts in place of a real user message list -- this
+# scenario doesn't send messages through ConversationEngine at all (see
+# run_booking_confirmation_phrasing_check below).
+BOOKING_CONFIRMATION_PHRASING_SCENARIO = Scenario(
+    name="booking_confirmation_phrasing",
+    messages=[
+        "(synthetic: real PromptBuilder BOOKING CONFIRMED prompt + "
+        "user reply '2' -- no ConversationEngine or live calendar involved)"
+    ],
+    checks=["non_empty", "no_crash", "no_leaked_confirmation_instruction"],
+)
 
 
 # ----------------------------------------------------------------------
@@ -240,6 +287,86 @@ def run_scenario(engine: ConversationEngine, scenario: Scenario) -> list[RunResu
             )
 
         run_results.append(RunResult(conversation_id=conversation_id, turns=turns))
+
+    return run_results
+
+
+def run_booking_confirmation_phrasing_check() -> list[RunResult]:
+    """
+    Regression check for the live-verification bug where Bray's booking
+    confirmation reply was a verbatim copy of PromptBuilder's own
+    internal instruction sentence, rather than a natural human
+    confirmation (see core_ai/prompt_builder.py's BOOKING CONFIRMED
+    section).
+
+    Deliberately bypasses ConversationEngine and the real Google
+    Calendar entirely: rather than driving a full qualifying
+    conversation through to a real numbered-slot offer and numeric
+    reply (which would create a real event on the connected calendar on
+    every eval run), this builds the exact system prompt
+    ConversationEngine would build immediately after a real booking
+    (plan.booking_confirmation set) and sends it straight to the real
+    LLM. That still exercises real LLM phrasing against the real
+    prompt -- the thing this regression is actually about -- with zero
+    calendar side effects.
+    """
+    plan = ConversationPlan(
+        strategy="drive_to_booking",
+        booking_confirmation=_BOOKING_CONFIRMATION_TEST_SLOT,
+    )
+    system_prompt = PromptBuilder().build(
+        stage="closing",
+        intent="buying_signal",
+        goal="book_demo",
+        knowledge="",
+        plan=plan,
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": "2"},
+    ]
+
+    run_results: list[RunResult] = []
+    for run_index in range(RUNS_PER_SCENARIO):
+        conversation_id = f"eval-booking_confirmation_phrasing-run{run_index + 1}-{uuid.uuid4().hex[:8]}"
+
+        try:
+            response = LLM().generate(messages)
+        except Exception as exc:  # noqa: BLE001 -- eval tool must never crash
+            run_results.append(
+                RunResult(
+                    conversation_id=conversation_id,
+                    turns=[
+                        TurnResult(
+                            user_message="2",
+                            response=None,
+                            crashed=True,
+                            error=f"{type(exc).__name__}: {exc}",
+                            check_results={"no_crash": False},
+                        )
+                    ],
+                )
+            )
+            continue
+
+        check_results = {
+            "no_crash": True,
+            "non_empty": non_empty(response),
+            "no_leaked_confirmation_instruction": no_leaked_confirmation_instruction(response),
+        }
+        run_results.append(
+            RunResult(
+                conversation_id=conversation_id,
+                turns=[
+                    TurnResult(
+                        user_message="2",
+                        response=response,
+                        crashed=False,
+                        check_results=check_results,
+                    )
+                ],
+            )
+        )
 
     return run_results
 
@@ -324,6 +451,10 @@ def main() -> int:
         run_results = run_scenario(engine, scenario)
         all_results[scenario.name] = run_results
         print_scenario_transcripts(scenario, run_results)
+
+    booking_phrasing_results = run_booking_confirmation_phrasing_check()
+    all_results[BOOKING_CONFIRMATION_PHRASING_SCENARIO.name] = booking_phrasing_results
+    print_scenario_transcripts(BOOKING_CONFIRMATION_PHRASING_SCENARIO, booking_phrasing_results)
 
     overall_pass = print_summary_table(all_results)
     return 0 if overall_pass else 1

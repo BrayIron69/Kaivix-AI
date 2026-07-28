@@ -54,7 +54,7 @@ class TestPromptBuilderBookingSections(unittest.TestCase):
         self.assertNotIn("BOOKING CONFIRMED", output_with_fields)
         self.assertNotIn("BOOKING SYSTEM ERROR", output_with_fields)
 
-    def test_booking_confirmation_is_narrated_for_verbatim_confirmation(self):
+    def test_booking_confirmation_states_exact_time_but_not_as_a_system_line(self):
         plan = ConversationPlan(
             strategy="drive_to_booking",
             booking_confirmation="Wednesday 10:00 AM - 11:00 AM",
@@ -63,9 +63,18 @@ class TestPromptBuilderBookingSections(unittest.TestCase):
         output = self._build(plan)
 
         self.assertIn("BOOKING CONFIRMED", output)
-        self.assertIn('"Wednesday 10:00 AM - 11:00 AM"', output)
-        self.assertIn("do not", output)
-        self.assertIn("paraphrase", output)
+        # The exact fact must still be present, so the model has the
+        # correct time available to state.
+        self.assertIn("Wednesday 10:00 AM - 11:00 AM", output)
+        # But the model must be told to phrase it naturally, not parrot
+        # this instruction's own sentence structure back to the visitor
+        # (the live-verification regression this guards against).
+        self.assertIn("natural", output.lower())
+        self.assertIn("not a system message", output.lower())
+        self.assertIn("do not copy", output.lower())
+        self.assertNotIn(
+            "A real calendar event was just created for", output
+        )
         self.assertNotIn("BOOKING SYSTEM ERROR", output)
 
     def test_booking_failed_is_narrated_with_calendly_fallback(self):
