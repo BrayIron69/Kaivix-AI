@@ -134,6 +134,8 @@ Completed
 
 \- Google Calendar Integration
 
+\- Deployment
+
 \- Production Testing
 
 \- UI Improvements
@@ -143,6 +145,60 @@ Completed
 \- Error Handling
 
 \- Documentation
+
+
+
+\---
+
+
+
+\## Deployment
+
+
+
+Status
+
+
+
+Planned — sequenced after current appointment scheduling verification completes
+
+
+
+Objective
+
+
+
+Get the AI Employee running on real infrastructure, reachable by real website visitors, replacing the current static/fake demo on kaivixlab.com with the actual working system.
+
+
+
+Key Requirements
+
+
+
+\- Containerize the backend (Dockerfile)
+
+\- Choose and provision hosting
+
+\- Deploy with production secrets configured (never committed to source)
+
+\- Update Google OAuth redirect URI for the production domain
+
+\- Connect the real chat widget (chat_widget.html already exists and works — it needs its hardcoded localhost API URL updated and to be embedded into the live site, not built from scratch)
+
+\- Verify the deployed instance behaves identically to local dev before opening it to real visitors
+
+
+
+Success Criteria
+
+
+
+\- A real website visitor can have a real conversation with Bray, get qualified, and book a real appointment — no mock data, no static demo content
+
+\- Secrets are never present in source control or client-side code
+
+\- The deployed instance passes the conversation-quality eval suite
 
 
 

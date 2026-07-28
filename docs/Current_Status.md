@@ -131,6 +131,23 @@ Items:
 **Status:** Built and unit-tested (Milestone 5) — provider, tenant-scoped OAuth token storage, OAuth router; real end-to-end live-calendar verification still pending
 **Priority:** High
 
+## Milestone: Production Deployment
+**Status:** Not Started — planned next after the current live booking verification (numbered-slot prompt fix + re-verification) completes
+**Priority:** High
+
+Sequenced steps:
+1. Create a Dockerfile and confirm the app reads `PORT` from the environment (required by most container hosts)
+2. Choose a hosting platform (leading candidate: Google Cloud Run, given the existing GCP account and genuine free tier fit — not yet finalized)
+3. Deploy with `GROQ_API_KEY`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` set as real platform secrets, never baked into the image or committed
+4. Add the production redirect URI to the existing Google OAuth client (alongside the localhost one, not replacing it)
+5. Reconnect Kaivix's calendar against the production URL
+6. Update `chat_widget.html`'s hardcoded `API_URL` (currently `http://localhost:8000/chat`) to the real production URL
+7. Embed the widget into the actual live kaivixlab.com pages, replacing the current static/scripted fake "Live demo" chat card
+8. Run the conversation-quality eval suite against the deployed instance before opening it to real visitors
+9. Basic uptime/error monitoring — at minimum, visibility if the server or LLM call fails while a real visitor is mid-conversation
+
+Note: `chat_widget.html` and the `/chat` API endpoint already exist and are functional — this milestone is about deployment and connection, not building a widget or API from scratch.
+
 ## Milestone: Production Testing
 **Status:** Not Started
 **Priority:** High
