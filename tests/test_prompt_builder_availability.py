@@ -68,9 +68,21 @@ class TestPromptBuilderAvailabilitySection(unittest.TestCase):
         output = self._build(plan)
 
         self.assertIn("REAL AVAILABLE TIMES", output)
-        self.assertIn("- Tuesday 2:00 PM - 3:00 PM", output)
-        self.assertIn("- Wednesday 10:00 AM - 11:00 AM", output)
-        self.assertIn("- Thursday 1:00 PM - 2:00 PM", output)
+
+        # Numbered list, in the exact order given -- not bullets --
+        # matching what slot_matcher expects the visitor to reply with.
+        self.assertIn("1. Tuesday 2:00 PM - 3:00 PM", output)
+        self.assertIn("2. Wednesday 10:00 AM - 11:00 AM", output)
+        self.assertIn("3. Thursday 1:00 PM - 2:00 PM", output)
+
+        # Explicit instruction to present the times as a numbered list,
+        # ask for a numeric reply, and treat it as the only question
+        # this message asks -- otherwise slot_matcher's strict
+        # digit/ordinal matching never gets a natural trigger in the
+        # real conversation (the exact gap a live end-to-end run found).
+        self.assertIn("numbered list", output)
+        self.assertIn("reply with the number", output)
+        self.assertIn("only question to ask in this message", output)
 
         # The section must come after the plan's strategy/next_question
         # lines, not scattered arbitrarily.

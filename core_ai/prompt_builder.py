@@ -204,7 +204,14 @@ RULES:
                 sections += [
                     "",
                     "REAL AVAILABLE TIMES (offer these instead of a vague booking ask):",
-                    *[f"- {slot}" for slot in plan_available_slots],
+                    *[
+                        f"{index}. {slot}"
+                        for index, slot in enumerate(plan_available_slots, start=1)
+                    ],
+                    "Present these to the visitor as a numbered list, in this exact "
+                    "order, and ask them to reply with the number of whichever time "
+                    "works for them. This is the only question to ask in this "
+                    "message — do not ask anything else alongside it.",
                 ]
 
             plan_booking_confirmation = getattr(plan, "booking_confirmation", "") or ""

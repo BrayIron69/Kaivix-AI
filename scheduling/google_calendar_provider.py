@@ -16,6 +16,14 @@ _BUSINESS_HOURS_START = time(9, 0)
 _BUSINESS_HOURS_END = time(17, 0)
 _MAX_RETURNED_SLOTS = 3
 
+# Fixed appointment length used to chunk each open gap into bookable
+# slots -- without this, a totally empty day comes back as one giant
+# multi-hour "slot" (e.g. 9:00 AM - 5:00 PM), which isn't something a
+# visitor can meaningfully pick as a single appointment time. Hardcoded
+# for now, consistent with minimum-change-per-milestone; per-business
+# configurable appointment length is a later concern.
+_APPOINTMENT_DURATION = timedelta(minutes=30)
+
 # Must match the redirect URI registered in Google Cloud for this OAuth
 # client, and api/routers/calendar_oauth.py's /oauth/google/callback route.
 #
@@ -144,6 +152,18 @@ class GoogleCalendarProvider(BaseCalendarProvider):
             include_granted_scopes="true",
             prompt="consent",
         )
+
+        # authorization_url() just auto-generated flow.code_verifier (PKCE)
+        # and encoded its hash into auth_url as code_challenge. This Flow
+        # instance is request-scoped and discarded once this method
+        # returns -- handle_oauth_callback() below runs in a separate HTTP
+        # request and builds its own, independent Flow object. Without
+        # persisting code_verifier here, that second Flow's fetch_token()
+        # call has no verifier to send back, and Google rejects the token
+        # exchange with "Missing code verifier" (confirmed via a real
+        # end-to-end run, not a hypothetical).
+        self.token_store.save_pending_verifier(business_id, flow.code_verifier)
+
         return auth_url
 
     def handle_oauth_callback(
@@ -151,7 +171,22 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         business_id: str = DEFAULT_BUSINESS_ID,
         authorization_response_url: str = "",
     ) -> None:
+        code_verifier = self.token_store.pop_pending_verifier(business_id)
+        if code_verifier is None:
+            raise RuntimeError(
+                f"No pending OAuth handshake found for business_id={business_id!r}. "
+                f"The authorization link may have expired or already been used -- "
+                f"call get_authorization_url() again to start a fresh consent flow."
+            )
+
         flow = self._build_flow(business_id)
+        # Must be set explicitly: this Flow instance is a brand-new object
+        # (see _build_flow's docstring comment on `state`) and never went
+        # through authorization_url(), so it never generated its own
+        # code_verifier -- it needs the one saved by get_authorization_url()
+        # above, retrieved via pop_pending_verifier() just above.
+        flow.code_verifier = code_verifier
+
         flow.fetch_token(authorization_response=authorization_response_url)
         self.token_store.save_token(business_id, self._credentials_to_dict(flow.credentials))
 
@@ -250,7 +285,14 @@ class GoogleCalendarProvider(BaseCalendarProvider):
 
             open_slots = []
             for window_start, window_end in day_windows:
-                open_slots.extend(self._subtract_busy(window_start, window_end, busy_blocks))
+                for gap_start, gap_end in self._subtract_busy(
+                    window_start, window_end, busy_blocks
+                ):
+                    open_slots.extend(
+                        self._chunk_into_slots(gap_start, gap_end, _APPOINTMENT_DURATION)
+                    )
+                    if len(open_slots) >= _MAX_RETURNED_SLOTS:
+                        break
                 if len(open_slots) >= _MAX_RETURNED_SLOTS:
                     break
 
@@ -385,6 +427,23 @@ class GoogleCalendarProvider(BaseCalendarProvider):
             open_slots.append((cursor, window_end))
 
         return open_slots
+
+    @staticmethod
+    def _chunk_into_slots(
+        gap_start: datetime, gap_end: datetime, duration: timedelta
+    ) -> list[tuple]:
+        """
+        Split one open [gap_start, gap_end) gap into sequential,
+        fixed-length (start, end) slots of exactly `duration`. A trailing
+        remainder shorter than `duration` is dropped entirely -- never
+        returned as a too-short slot.
+        """
+        slots = []
+        cursor = gap_start
+        while cursor + duration <= gap_end:
+            slots.append((cursor, cursor + duration))
+            cursor += duration
+        return slots
 
     @staticmethod
     def format_slot(start: datetime, end: datetime) -> str:

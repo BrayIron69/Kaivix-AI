@@ -92,6 +92,26 @@ class TestCalendarTokenStore(unittest.TestCase):
         self.assertIsNotNone(self.store.load_token("business-b"))
         self.assertEqual(self.store.load_token("business-b")["token"], "token-b")
 
+    def test_pending_verifier_save_and_pop_round_trip(self):
+        self.store.save_pending_verifier("kaivix", "verifier-abc123")
+        self.assertEqual(self.store.pop_pending_verifier("kaivix"), "verifier-abc123")
+
+    def test_pop_pending_verifier_deletes_it(self):
+        self.store.save_pending_verifier("kaivix", "verifier-abc123")
+        self.store.pop_pending_verifier("kaivix")
+
+        # A second pop must find nothing -- a verifier is never reused.
+        self.assertIsNone(self.store.pop_pending_verifier("kaivix"))
+
+    def test_pop_pending_verifier_returns_none_when_absent(self):
+        self.assertIsNone(self.store.pop_pending_verifier("never-started"))
+
+    def test_save_pending_verifier_replaces_on_repeated_handshake(self):
+        self.store.save_pending_verifier("kaivix", "first-verifier")
+        self.store.save_pending_verifier("kaivix", "second-verifier")
+
+        self.assertEqual(self.store.pop_pending_verifier("kaivix"), "second-verifier")
+
 
 if __name__ == "__main__":
     unittest.main()

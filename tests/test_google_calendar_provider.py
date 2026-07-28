@@ -1,9 +1,12 @@
+import os
+import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+from scheduling.calendar_token_store import CalendarTokenStore
 from scheduling.google_calendar_provider import GoogleCalendarProvider, SCOPES
 
 UTC = ZoneInfo("UTC")
@@ -274,6 +277,60 @@ class TestGoogleCalendarProviderSubtractBusy(unittest.TestCase):
         self.assertEqual(formatted, "Tuesday 2:00 PM - 3:00 PM")
 
 
+class TestGoogleCalendarProviderChunkIntoSlots(unittest.TestCase):
+    """
+    Pure-logic tests for _chunk_into_slots -- the fix for a genuine gap a
+    live end-to-end run found: an entirely open gap used to be returned
+    as one giant multi-hour "slot" (e.g. 9:00 AM - 5:00 PM on a fully
+    free day), which isn't something a visitor can meaningfully pick as
+    a single appointment time.
+    """
+
+    _DURATION = timedelta(minutes=30)
+
+    def test_full_business_day_produces_sixteen_30_minute_slots(self):
+        start = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+        end = datetime(2026, 3, 10, 17, 0, tzinfo=UTC)  # 8 hours
+
+        slots = GoogleCalendarProvider._chunk_into_slots(start, end, self._DURATION)
+
+        self.assertEqual(len(slots), 16)
+        self.assertEqual(slots[0], (start, start + self._DURATION))
+        self.assertEqual(slots[-1], (end - self._DURATION, end))
+        for slot_start, slot_end in slots:
+            self.assertEqual(slot_end - slot_start, self._DURATION)
+
+    def test_gap_shorter_than_duration_is_excluded_entirely(self):
+        start = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+        end = datetime(2026, 3, 10, 9, 15, tzinfo=UTC)  # 15 minutes, shorter than 30
+
+        slots = GoogleCalendarProvider._chunk_into_slots(start, end, self._DURATION)
+
+        self.assertEqual(slots, [])
+
+    def test_exact_duration_gap_produces_exactly_one_slot(self):
+        start = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+        end = datetime(2026, 3, 10, 9, 30, tzinfo=UTC)
+
+        slots = GoogleCalendarProvider._chunk_into_slots(start, end, self._DURATION)
+
+        self.assertEqual(slots, [(start, end)])
+
+    def test_remainder_shorter_than_duration_is_dropped_not_returned_short(self):
+        start = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+        end = datetime(2026, 3, 10, 10, 15, tzinfo=UTC)  # 75 minutes: 2 full slots + 15 min dropped
+
+        slots = GoogleCalendarProvider._chunk_into_slots(start, end, self._DURATION)
+
+        self.assertEqual(
+            slots,
+            [
+                (start, start + self._DURATION),
+                (start + self._DURATION, start + 2 * self._DURATION),
+            ],
+        )
+
+
 class TestGoogleCalendarProviderFreeBusySlots(unittest.TestCase):
     """
     Exercises the full get_free_busy_slots() call path with Credentials
@@ -422,6 +479,8 @@ class TestGoogleCalendarProviderFreeBusyWindows(unittest.TestCase):
             self.assertIsInstance(start, datetime)
             self.assertIsInstance(end, datetime)
             self.assertLess(start, end)
+            # Fixed 30-minute appointment slots, not a raw multi-hour gap.
+            self.assertEqual(end - start, timedelta(minutes=30))
 
         # get_free_busy_slots' formatted strings must be exactly
         # format_slot() applied to these same windows -- proves the two
@@ -431,6 +490,39 @@ class TestGoogleCalendarProviderFreeBusyWindows(unittest.TestCase):
         self.assertEqual(
             slots, [GoogleCalendarProvider.format_slot(start, end) for start, end in windows]
         )
+
+    @patch("googleapiclient.discovery.build")
+    @patch("google.oauth2.credentials.Credentials")
+    def test_empty_calendar_day_produces_multiple_slots_not_one_giant_block(
+        self, mock_credentials_cls, mock_build
+    ):
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        mock_credentials = MagicMock()
+        mock_credentials.expired = False
+        mock_credentials_cls.return_value = mock_credentials
+
+        # Entirely empty calendar -- the exact scenario a live end-to-end
+        # run found returning one 8-hour "slot" (9:00 AM - 5:00 PM)
+        # before this fix.
+        mock_service = MagicMock()
+        mock_service.freebusy().query().execute.return_value = {
+            "calendars": {"primary": {"busy": []}}
+        }
+        mock_build.return_value = mock_service
+
+        provider = _make_provider(token_store=token_store)
+        windows = provider.get_free_busy_windows("business-a")
+
+        # Capped at 3 (existing behavior) -- with a fully open 8-hour
+        # business day, that cap is hit well before the day is chunked
+        # through entirely, proving multiple slots come back rather than
+        # one giant block.
+        self.assertEqual(len(windows), 3)
+        for start, end in windows:
+            self.assertEqual(end - start, timedelta(minutes=30))
+            self.assertLess(end - start, timedelta(hours=8))
 
 
 class TestGoogleCalendarProviderCreateEvent(unittest.TestCase):
@@ -557,6 +649,132 @@ class TestGoogleCalendarProviderCreateEvent(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIsNone(result["event_link"])
         self.assertIsNotNone(result["error"])
+
+
+class _FakeFlow:
+    """
+    Minimal stand-in for google_auth_oauthlib.flow.Flow -- deliberately
+    NOT a MagicMock, because a MagicMock auto-generates a fresh, truthy
+    `.code_verifier` attribute for every distinct mock instance regardless
+    of what any other instance was given, which would silently hide the
+    exact bug this test exists to catch (a real end-to-end run found it;
+    the old wholesale-mocked-Flow tests could not have).
+
+    Mimics only the one behavior this bug hinges on: authorization_url()
+    populates a real code_verifier attribute (like the real library's
+    PKCE auto-generation), and fetch_token() needs that same value to
+    already be set on this exact instance to succeed.
+    """
+
+    def __init__(self):
+        self.code_verifier = None
+        self.credentials = SimpleNamespace(
+            token="access-token",
+            refresh_token="refresh-token",
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=SCOPES,
+        )
+        self.fetch_token_calls: list[dict] = []
+
+    def authorization_url(self, **kwargs):
+        self.code_verifier = "real-pkce-verifier-abc123"
+        return "https://accounts.google.com/o/oauth2/auth?code_challenge=fake", "kaivix"
+
+    def fetch_token(self, **kwargs):
+        if self.code_verifier is None:
+            # Mirrors Google's real rejection when no verifier was set on
+            # this Flow instance before the exchange.
+            raise RuntimeError("(invalid_grant) Missing code verifier.")
+        self.fetch_token_calls.append(dict(kwargs))
+
+
+class TestGoogleCalendarProviderPKCECodeVerifierPlumbing(unittest.TestCase):
+    """
+    Proves the specific plumbing that fixes a real bug found during a
+    real end-to-end verification run: get_authorization_url() and
+    handle_oauth_callback() build two independent Flow objects across two
+    separate HTTP requests. The PKCE code_verifier auto-generated by the
+    first must be persisted and replayed onto the second, or Google
+    rejects the token exchange with "Missing code verifier" -- confirmed
+    against the real OAuth server, not a hypothetical.
+
+    Uses a real CalendarTokenStore (temp db) -- not a mocked one -- so
+    save_pending_verifier/pop_pending_verifier are genuinely exercised,
+    not just asserted as mock calls.
+    """
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(self.db_path)
+
+    def tearDown(self):
+        if os.path.exists(self.db_path):
+            os.remove(self.db_path)
+
+    def test_code_verifier_from_connect_step_is_replayed_on_callback_step(self):
+        token_store = CalendarTokenStore(db_path=self.db_path)
+        connect_flow = _FakeFlow()
+        callback_flow = _FakeFlow()
+
+        with patch(
+            "google_auth_oauthlib.flow.Flow.from_client_config",
+            side_effect=[connect_flow, callback_flow],
+        ):
+            provider = _make_provider(token_store=token_store)
+
+            # --- /connect step (first HTTP request, first Flow object) ---
+            provider.get_authorization_url("kaivix")
+
+            # The real value this specific Flow instance auto-generated
+            # was actually persisted -- checked directly against the
+            # database, not a mock call.
+            conn = token_store._get_connection()
+            row = conn.execute(
+                "SELECT code_verifier FROM oauth_pending_verifiers WHERE state = ?",
+                ("kaivix",),
+            ).fetchone()
+            conn.close()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["code_verifier"], "real-pkce-verifier-abc123")
+
+            # --- /callback step (second HTTP request, second Flow object) ---
+            callback_url = "http://localhost:8000/oauth/google/callback?code=abc123&state=kaivix"
+            provider.handle_oauth_callback("kaivix", callback_url)
+
+        # The second, independent Flow instance had the first instance's
+        # verifier explicitly set on it before fetch_token() ran.
+        self.assertEqual(callback_flow.code_verifier, "real-pkce-verifier-abc123")
+        self.assertEqual(len(callback_flow.fetch_token_calls), 1)
+
+        # The verifier is single-use: popped, not just read.
+        conn = token_store._get_connection()
+        row = conn.execute(
+            "SELECT code_verifier FROM oauth_pending_verifiers WHERE state = ?",
+            ("kaivix",),
+        ).fetchone()
+        conn.close()
+        self.assertIsNone(row)
+
+        # And the token exchange actually completed and was saved.
+        saved = token_store.load_token("kaivix")
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["token"], "access-token")
+
+    def test_missing_pending_verifier_raises_clear_error_instead_of_attempting_exchange(self):
+        token_store = CalendarTokenStore(db_path=self.db_path)
+        provider = _make_provider(token_store=token_store)
+
+        # No get_authorization_url() call happened first -- no pending
+        # verifier exists for "kaivix".
+        with self.assertRaises(RuntimeError) as ctx:
+            provider.handle_oauth_callback(
+                "kaivix",
+                "http://localhost:8000/oauth/google/callback?code=abc123&state=kaivix",
+            )
+
+        self.assertIn("kaivix", str(ctx.exception))
+        self.assertIsNone(token_store.load_token("kaivix"))
 
 
 if __name__ == "__main__":
