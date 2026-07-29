@@ -106,8 +106,8 @@ class LeadService:
     def update_lead(self, email, business_id=DEFAULT_BUSINESS_ID, **updates):
         return self.update(email, business_id=business_id, **updates)
 
-    def delete(self, email):
-        return self.crm.delete_lead(email)
+    def delete(self, email, business_id=DEFAULT_BUSINESS_ID):
+        return self.crm.delete_lead(email, business_id=business_id)
 
-    def delete_lead(self, email):
-        return self.delete(email)
+    def delete_lead(self, email, business_id=DEFAULT_BUSINESS_ID):
+        return self.delete(email, business_id=business_id)

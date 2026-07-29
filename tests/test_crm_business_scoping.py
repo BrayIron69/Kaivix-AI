@@ -83,6 +83,43 @@ class TestCRMBusinessScoping(unittest.TestCase):
         saved = self.crm.save_lead({"name": "Default", "email": "d@example.com"})
         self.assertEqual(saved.business_id, "kaivix")
 
+    def test_delete_lead_scoped_by_business(self):
+        """
+        delete_lead matched on email alone while every other method was
+        business-scoped, so deleting one tenant's lead wiped the same
+        email out of every other tenant too.
+        """
+        email = "shared4@example.com"
+        self.crm.save_lead({"name": "A", "email": email}, business_id="business-a")
+        self.crm.save_lead({"name": "B", "email": email}, business_id="business-b")
+
+        self.crm.delete_lead(email, business_id="business-a")
+
+        self.assertIsNone(
+            self.crm.get_lead_by_email(email, business_id="business-a")
+        )
+        surviving = self.crm.get_lead_by_email(email, business_id="business-b")
+        self.assertIsNotNone(surviving)
+        self.assertEqual(surviving.name, "B")
+
+    def test_delete_lead_from_another_business_is_a_no_op(self):
+        email = "shared5@example.com"
+        self.crm.save_lead({"name": "A", "email": email}, business_id="business-a")
+
+        self.assertFalse(
+            self.crm.delete_lead(email, business_id="business-b")
+        )
+        self.assertIsNotNone(
+            self.crm.get_lead_by_email(email, business_id="business-a")
+        )
+
+    def test_delete_lead_defaults_to_the_default_business_id(self):
+        email = "default-delete@example.com"
+        self.crm.save_lead({"name": "Default", "email": email})
+
+        self.assertTrue(self.crm.delete_lead(email))
+        self.assertIsNone(self.crm.get_lead_by_email(email))
+
 
 class TestLeadFromRowPositionalFallback(unittest.TestCase):
     """

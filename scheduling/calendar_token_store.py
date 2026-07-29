@@ -62,6 +62,7 @@ class CalendarTokenStore:
                 refresh_token TEXT,
                 token_uri TEXT,
                 scopes TEXT,
+                expiry TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -75,8 +76,37 @@ class CalendarTokenStore:
             )
             """
         )
+
+        # `expiry` was added after the first deployment, so an existing
+        # calendar_tokens.db (including the live one) predates it and
+        # CREATE TABLE IF NOT EXISTS above won't add it. Same additive
+        # ALTER-if-missing migration crm/database.py uses. Rows written
+        # before this keep expiry NULL, which GoogleCalendarProvider
+        # treats as "unknown, fall back to the library's own check"
+        # rather than as "never expires".
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(calendar_tokens)")
+        }
+        if "expiry" not in existing_columns:
+            conn.execute("ALTER TABLE calendar_tokens ADD COLUMN expiry TEXT")
+
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _serialize_expiry(expiry) -> str | None:
+        """
+        Normalize an expiry to ISO-8601 text for storage. Accepts a
+        datetime or an already-formatted string so callers can pass
+        either; anything falsy becomes NULL.
+        """
+        if not expiry:
+            return None
+
+        if isinstance(expiry, datetime):
+            return expiry.isoformat()
+
+        return str(expiry)
 
     # ------------------------------------------------------------------
     # Public API
@@ -90,14 +120,16 @@ class CalendarTokenStore:
         conn.execute(
             """
             INSERT INTO calendar_tokens (
-                business_id, token, refresh_token, token_uri, scopes, updated_at
+                business_id, token, refresh_token, token_uri, scopes,
+                expiry, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(business_id) DO UPDATE SET
                 token = excluded.token,
                 refresh_token = excluded.refresh_token,
                 token_uri = excluded.token_uri,
                 scopes = excluded.scopes,
+                expiry = excluded.expiry,
                 updated_at = excluded.updated_at
             """,
             (
@@ -106,6 +138,7 @@ class CalendarTokenStore:
                 credentials_dict.get("refresh_token"),
                 credentials_dict.get("token_uri"),
                 scopes_json,
+                self._serialize_expiry(credentials_dict.get("expiry")),
                 now,
             ),
         )
@@ -130,6 +163,7 @@ class CalendarTokenStore:
             "refresh_token": row["refresh_token"],
             "token_uri": row["token_uri"],
             "scopes": json.loads(row["scopes"] or "[]"),
+            "expiry": row["expiry"],
             "updated_at": row["updated_at"],
         }
 

@@ -1,6 +1,19 @@
+from typing import Optional
+
+from core_ai.business_config import (
+    BusinessConfig,
+    BusinessConfigRepository,
+    DEFAULT_BUSINESS_ID,
+)
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.intents import Intent
 from core_ai.stages import ConversationStage
+
+# Shared, process-lifetime repository for the default (Kaivix)
+# BusinessConfig used whenever a caller doesn't pass one explicitly --
+# same pattern as core_ai/qualification_engine.py and
+# core_ai/prompt_builder.py.
+_default_business_config_repository = BusinessConfigRepository()
 
 
 class PlanningEngine:
@@ -39,18 +52,50 @@ class PlanningEngine:
 
     HOT_TEMPERATURE = "Hot"
 
-    # Natural-language guidance for each qualification field, used only
-    # as a *suggestion* for the LLM's next question. The priority order
-    # of missing fields itself comes from QualificationEngine (it is
-    # not re-derived here) so there is a single source of truth for
-    # "which field matters most."
-    _FIELD_QUESTIONS = {
-        "name": "Ask for their name.",
-        "email": "Ask for an email address so we can follow up.",
-        "company": "Ask what company or business they represent.",
-        "budget": "Ask about their budget for this kind of solution.",
-        "timeline": "Ask about their timeline for getting started.",
-    }
+    # Used when a field has no prompt_hint of its own in the business's
+    # qualification schema.
+    _DEFAULT_FIELD_QUESTION = "Continue gathering qualification details."
+
+    def __init__(self, business_config: Optional[BusinessConfig] = None):
+        """
+        Natural-language guidance for each qualification field, used only
+        as a *suggestion* for the LLM's next question, is read from the
+        business's own qualification schema
+        (BusinessConfig.qualification.fields[].prompt_hint).
+
+        This used to be a hardcoded _FIELD_QUESTIONS dict whose five
+        entries were byte-identical copies of
+        config/businesses/kaivix/qualification.yaml's prompt_hints --
+        two places to edit for one fact, and every non-Kaivix business
+        silently got Kaivix's wording (or the generic fallback for any
+        field Kaivix doesn't have). qualification.yaml is now the single
+        source of truth; the priority *order* of missing fields still
+        comes from QualificationEngine and is not re-derived here.
+        """
+        if business_config is None:
+            business_config = _default_business_config_repository.load(DEFAULT_BUSINESS_ID)
+
+        self._field_questions = self._build_field_questions(business_config)
+
+    @staticmethod
+    def _build_field_questions(business_config) -> dict:
+        """
+        Map field id -> prompt_hint from the business's qualification
+        schema. Read defensively (getattr rather than attribute access)
+        so a partial config never breaks planning -- a field without a
+        usable hint simply falls back to _DEFAULT_FIELD_QUESTION.
+        """
+        qualification = getattr(business_config, "qualification", None)
+        fields = getattr(qualification, "fields", None) or []
+
+        field_questions = {}
+        for field in fields:
+            field_id = getattr(field, "id", None)
+            prompt_hint = getattr(field, "prompt_hint", "")
+            if field_id and prompt_hint:
+                field_questions[field_id] = prompt_hint
+
+        return field_questions
 
     def plan(
         self,
@@ -158,12 +203,12 @@ class PlanningEngine:
 
         # Avoid immediately repeating the question we just asked.
         if len(missing_fields) > 1 and last_assistant_message:
-            candidate_question = self._FIELD_QUESTIONS.get(target_field, "")
+            candidate_question = self._field_questions.get(target_field, "")
             if candidate_question and candidate_question in last_assistant_message:
                 target_field = missing_fields[1]
 
-        next_question = self._FIELD_QUESTIONS.get(
-            target_field, "Continue gathering qualification details."
+        next_question = self._field_questions.get(
+            target_field, self._DEFAULT_FIELD_QUESTION
         )
 
         # Don't volunteer pricing while qualification is still incomplete,

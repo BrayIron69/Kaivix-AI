@@ -1,1 +1,9 @@
-enabled_tools: []
+# Capabilities ConversationEngine is allowed to use for this business.
+#
+# calendar_booking gates both halves of the scheduling feature: offering
+# real availability from the connected Google Calendar, and creating a
+# real event when a visitor picks a slot. A connected calendar is
+# necessary but no longer sufficient -- the tool has to be listed here
+# too (see ConversationEngine._calendar_booking_enabled).
+enabled_tools:
+  - calendar_booking

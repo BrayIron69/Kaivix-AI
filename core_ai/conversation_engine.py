@@ -63,6 +63,13 @@ class ConversationEngine:
     # check.
     _SUMMARY_REFRESH_INTERVAL_TURNS = 5
 
+    # Name in BusinessConfig.tools.enabled_tools that gates the calendar
+    # scheduling feature. Until now enabled_tools was loaded and then
+    # ignored: booking was gated only by whether a Google Calendar
+    # happened to be OAuth-connected, so a business could not turn the
+    # feature off without disconnecting the calendar entirely.
+    _CALENDAR_BOOKING_TOOL = "calendar_booking"
+
     def __init__(
         self,
         summary_refresh_interval_turns: int = _SUMMARY_REFRESH_INTERVAL_TURNS,
@@ -88,7 +95,7 @@ class ConversationEngine:
         self.goal_engine = GoalEngine()
         self.entity_extractor = EntityExtractor()
         self.lead_intelligence_engine = LeadIntelligenceEngine()
-        self.planning_engine = PlanningEngine()
+        self.planning_engine = PlanningEngine(business_config=self.business_config)
         self.qualification_engine = QualificationEngine(business_config=self.business_config)
         self.prompt_builder = PromptBuilder()
         self.lead_service = LeadService()
@@ -390,6 +397,21 @@ class ConversationEngine:
     # Scheduling / Calendar
     # ------------------------------------------------------------------
 
+    def _calendar_booking_enabled(self) -> bool:
+        """
+        Whether this business has the calendar_booking tool switched on
+        in BusinessConfig.tools.enabled_tools.
+
+        Fails closed: a config with no tools section, or an empty
+        enabled_tools, means the feature is off. Read fresh from the
+        cached BusinessConfig rather than snapshotted at construction,
+        so it stays consistent with how every other config value is
+        consumed.
+        """
+        tools = getattr(self.business_config, "tools", None)
+        enabled_tools = getattr(tools, "enabled_tools", None) or []
+        return self._CALENDAR_BOOKING_TOOL in enabled_tools
+
     def _maybe_attach_availability(
         self,
         conversation_id: str,
@@ -419,6 +441,11 @@ class ConversationEngine:
         """
         try:
             if plan.strategy != "drive_to_booking":
+                return plan
+
+            # Config gate first -- cheapest check, and no reason to touch
+            # the calendar at all for a business with booking switched off.
+            if not self._calendar_booking_enabled():
                 return plan
 
             if not self.calendar_provider.is_connected(self.business_id):
@@ -465,6 +492,14 @@ class ConversationEngine:
         to "nothing resolved" rather than breaking the turn.
         """
         try:
+            # Same gate as _maybe_attach_availability. Checked here too
+            # rather than relying on "nothing was ever offered": slots
+            # could have been offered before the tool was switched off,
+            # and creating a real calendar event is exactly the side
+            # effect a disabled tool must not produce.
+            if not self._calendar_booking_enabled():
+                return None
+
             offered_slots = list(working_memory.offered_slots or [])
             if not offered_slots:
                 return None

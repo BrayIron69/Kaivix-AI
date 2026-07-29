@@ -243,16 +243,16 @@ class SQLiteCRM(BaseCRM):
 
         return updated
 
-    def delete_lead(self, email):
+    def delete_lead(self, email, business_id=DEFAULT_BUSINESS_ID):
         conn = get_connection()
         cursor = conn.cursor()
 
         cursor.execute(
             """
             DELETE FROM leads
-            WHERE email = ?
+            WHERE email = ? AND business_id = ?
             """,
-            (email,),
+            (email, business_id),
         )
 
         conn.commit()

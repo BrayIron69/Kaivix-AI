@@ -124,6 +124,9 @@ class TestGoogleCalendarProviderOAuthCallback(unittest.TestCase):
         mock_credentials.refresh_token = "refresh-token"
         mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
         mock_credentials.scopes = SCOPES
+        # Google returns an expiry with the token; it has to be persisted
+        # or every later load treats the token as never-expiring.
+        mock_credentials.expiry = datetime(2026, 7, 29, 12, 0, 0)
 
         mock_flow = MagicMock()
         mock_flow.credentials = mock_credentials
@@ -143,6 +146,7 @@ class TestGoogleCalendarProviderOAuthCallback(unittest.TestCase):
                 "refresh_token": "refresh-token",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "scopes": SCOPES,
+                "expiry": "2026-07-29T12:00:00",
             },
         )
 
@@ -164,11 +168,19 @@ class TestGoogleCalendarProviderListCalendars(unittest.TestCase):
 
         mock_credentials = MagicMock()
         mock_credentials.expired = True
+        mock_credentials.expiry = datetime(2020, 1, 1, 0, 0, 0)
         mock_credentials.refresh_token = "refresh-token"
         mock_credentials.token = "refreshed-access-token"
         mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
         mock_credentials.scopes = SCOPES
         mock_credentials_cls.return_value = mock_credentials
+
+        # A real refresh() replaces expiry with the new token's; the
+        # refreshed expiry (not the stale one) is what must be persisted.
+        def _refresh(_request):
+            mock_credentials.expiry = datetime(2030, 1, 1, 0, 0, 0)
+
+        mock_credentials.refresh.side_effect = _refresh
 
         mock_service = MagicMock()
         mock_service.calendarList().list().execute.return_value = {
@@ -187,6 +199,7 @@ class TestGoogleCalendarProviderListCalendars(unittest.TestCase):
                 "refresh_token": "refresh-token",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "scopes": SCOPES,
+                "expiry": "2030-01-01T00:00:00",
             },
         )
 
@@ -823,6 +836,158 @@ class TestGoogleCalendarProviderPKCECodeVerifierPlumbing(unittest.TestCase):
 
         self.assertIn("kaivix", str(ctx.exception))
         self.assertIsNone(token_store.load_token("kaivix"))
+
+
+class TestGoogleCalendarProviderProactiveRefresh(unittest.TestCase):
+    """
+    Expiry-driven refresh (_needs_refresh / _load_credentials).
+
+    Before expiry was persisted, every reloaded credential had
+    expiry=None, which google-auth documents as "never expires" --
+    Credentials.expired returned False unconditionally, so the refresh
+    branch never ran and the first sign of a dead token was a 401.
+    """
+
+    @staticmethod
+    def _naive_utc_now():
+        return datetime.now(UTC).replace(tzinfo=None)
+
+    def _stored(self, expiry):
+        return {
+            "business_id": "business-a",
+            "token": "stored-token",
+            "refresh_token": "refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": SCOPES,
+            "expiry": expiry,
+        }
+
+    def _load_with(self, stored_expiry, mock_credentials_cls, credentials_expired=False):
+        token_store = MagicMock()
+        token_store.load_token.return_value = self._stored(stored_expiry)
+
+        mock_credentials = MagicMock()
+        mock_credentials.refresh_token = "refresh-token"
+        mock_credentials.token = "some-token"
+        mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
+        mock_credentials.scopes = SCOPES
+        mock_credentials.expired = credentials_expired
+        # Credentials() is mocked, so it won't set .expiry from the kwarg
+        # the way a real one does -- mirror it explicitly.
+        mock_credentials.expiry = GoogleCalendarProvider._deserialize_expiry(
+            stored_expiry
+        )
+        mock_credentials_cls.return_value = mock_credentials
+
+        provider = _make_provider(token_store=token_store)
+        provider._load_credentials("business-a")
+
+        return mock_credentials, token_store
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_token_expiring_within_the_margin_is_refreshed_before_use(
+        self, mock_credentials_cls
+    ):
+        expiring_soon = (self._naive_utc_now() + timedelta(minutes=2)).isoformat()
+
+        credentials, token_store = self._load_with(expiring_soon, mock_credentials_cls)
+
+        credentials.refresh.assert_called_once()
+        token_store.save_token.assert_called_once()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_already_expired_token_is_refreshed(self, mock_credentials_cls):
+        long_gone = (self._naive_utc_now() - timedelta(hours=3)).isoformat()
+
+        credentials, _ = self._load_with(long_gone, mock_credentials_cls)
+
+        credentials.refresh.assert_called_once()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_token_with_plenty_of_life_left_is_not_refreshed(
+        self, mock_credentials_cls
+    ):
+        plenty_left = (self._naive_utc_now() + timedelta(minutes=55)).isoformat()
+
+        credentials, token_store = self._load_with(plenty_left, mock_credentials_cls)
+
+        credentials.refresh.assert_not_called()
+        token_store.save_token.assert_not_called()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_refresh_fires_earlier_than_the_libraries_own_threshold(
+        self, mock_credentials_cls
+    ):
+        """
+        google-auth's REFRESH_THRESHOLD is ~3m45s. A token 4 minutes out
+        is 'not expired' by that measure but is inside our 5-minute
+        margin -- this is the window the live 401s came from.
+        """
+        four_minutes_out = (self._naive_utc_now() + timedelta(minutes=4)).isoformat()
+
+        credentials, _ = self._load_with(
+            four_minutes_out, mock_credentials_cls, credentials_expired=False
+        )
+
+        credentials.refresh.assert_called_once()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_stored_expiry_is_passed_into_credentials(self, mock_credentials_cls):
+        self._load_with("2030-01-01T00:00:00", mock_credentials_cls)
+
+        _args, kwargs = mock_credentials_cls.call_args
+        self.assertEqual(kwargs["expiry"], datetime(2030, 1, 1, 0, 0, 0))
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_timezone_aware_stored_expiry_is_normalized_to_naive_utc(
+        self, mock_credentials_cls
+    ):
+        """
+        google-auth compares expiry against a naive utcnow(); an aware
+        datetime would raise on every comparison.
+        """
+        self._load_with("2030-01-01T00:00:00+02:00", mock_credentials_cls)
+
+        _args, kwargs = mock_credentials_cls.call_args
+        self.assertEqual(kwargs["expiry"], datetime(2029, 12, 31, 22, 0, 0))
+        self.assertIsNone(kwargs["expiry"].tzinfo)
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_unknown_expiry_falls_back_to_the_library_check_when_expired(
+        self, mock_credentials_cls
+    ):
+        """Rows written before the expiry column existed."""
+        credentials, _ = self._load_with(
+            None, mock_credentials_cls, credentials_expired=True
+        )
+
+        credentials.refresh.assert_called_once()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_unknown_expiry_does_not_refresh_a_credential_reported_valid(
+        self, mock_credentials_cls
+    ):
+        credentials, _ = self._load_with(
+            None, mock_credentials_cls, credentials_expired=False
+        )
+
+        credentials.refresh.assert_not_called()
+
+    @patch("google.oauth2.credentials.Credentials")
+    def test_unparseable_stored_expiry_does_not_raise(self, mock_credentials_cls):
+        credentials, _ = self._load_with(
+            "not-a-timestamp", mock_credentials_cls, credentials_expired=False
+        )
+
+        credentials.refresh.assert_not_called()
+
+    def test_serialize_expiry_handles_none_and_non_datetimes(self):
+        self.assertIsNone(GoogleCalendarProvider._serialize_expiry(None))
+        self.assertIsNone(GoogleCalendarProvider._serialize_expiry("whatever"))
+        self.assertEqual(
+            GoogleCalendarProvider._serialize_expiry(datetime(2030, 1, 1, 0, 0, 0)),
+            "2030-01-01T00:00:00",
+        )
 
 
 if __name__ == "__main__":

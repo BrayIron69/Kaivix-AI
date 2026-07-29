@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -23,6 +23,13 @@ _MAX_RETURNED_SLOTS = 3
 # for now, consistent with minimum-change-per-milestone; per-business
 # configurable appointment length is a later concern.
 _APPOINTMENT_DURATION = timedelta(minutes=30)
+
+# How long before a stored access token actually expires we refresh it.
+# Wider than google-auth's own ~3m45s REFRESH_THRESHOLD on purpose: that
+# one is evaluated when the credential is constructed, so a request that
+# starts just inside it can still reach Google after the token has died
+# -- the "occasional stale-token 401" seen during live verification.
+_EXPIRY_REFRESH_MARGIN = timedelta(minutes=5)
 
 # Must match the redirect URI registered in Google Cloud for this OAuth
 # client, and api/routers/calendar_oauth.py's /oauth/google/callback route.
@@ -121,7 +128,67 @@ class GoogleCalendarProvider(BaseCalendarProvider):
             "refresh_token": credentials.refresh_token,
             "token_uri": credentials.token_uri,
             "scopes": credentials.scopes,
+            "expiry": self._serialize_expiry(getattr(credentials, "expiry", None)),
         }
+
+    @staticmethod
+    def _serialize_expiry(expiry) -> str | None:
+        """ISO-8601 text for CalendarTokenStore, or None if unknown."""
+        if not isinstance(expiry, datetime):
+            return None
+        return expiry.isoformat()
+
+    @staticmethod
+    def _deserialize_expiry(value) -> Optional[datetime]:
+        """
+        Parse a stored expiry back into the naive-UTC datetime
+        google.oauth2.credentials.Credentials expects. google-auth
+        compares expiry against its own naive _helpers.utcnow(), so an
+        aware datetime here would raise on every comparison -- any
+        offset is applied and then dropped. Unparseable/absent values
+        return None, which callers treat as "unknown".
+        """
+        if isinstance(value, datetime):
+            parsed = value
+        elif value:
+            try:
+                parsed = datetime.fromisoformat(str(value))
+            except ValueError:
+                return None
+        else:
+            return None
+
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+        return parsed
+
+    def _needs_refresh(self, credentials) -> bool:
+        """
+        Decide whether to refresh *before* using a token, rather than
+        waiting for the API to reject it.
+
+        Previously this was `credentials.expired` alone, which looked
+        proactive but never fired: expiry was not persisted, so every
+        reloaded credential had expiry=None, and google-auth documents
+        expiry=None as "never expires" (Credentials.expired returns
+        False). Every token therefore went to Google unchecked and the
+        first sign of a stale one was a 401.
+
+        With expiry stored we refresh once it is inside
+        _EXPIRY_REFRESH_MARGIN of running out -- deliberately wider than
+        google-auth's own ~3m45s threshold, so a long-running request
+        can't start just inside the library's window and land after the
+        token dies. Falls back to the library's check when expiry is
+        unknown (rows written before the column existed).
+        """
+        expiry = self._deserialize_expiry(getattr(credentials, "expiry", None))
+
+        if expiry is None:
+            return bool(credentials.expired)
+
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        return now_utc_naive >= expiry - _EXPIRY_REFRESH_MARGIN
 
     def _load_credentials(self, business_id: str):
         from google.auth.transport.requests import Request
@@ -138,9 +205,10 @@ class GoogleCalendarProvider(BaseCalendarProvider):
             client_id=self.client_id,
             client_secret=self.client_secret,
             scopes=stored["scopes"],
+            expiry=self._deserialize_expiry(stored.get("expiry")),
         )
 
-        if credentials.expired and credentials.refresh_token:
+        if self._needs_refresh(credentials) and credentials.refresh_token:
             credentials.refresh(Request())
             self.token_store.save_token(business_id, self._credentials_to_dict(credentials))
 

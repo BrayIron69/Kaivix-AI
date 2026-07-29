@@ -17,9 +17,25 @@ app = FastAPI(
     description="Backend API for the Kaivix Labs AI Sales Agent CRM",
 )
 
+# The only origins that legitimately call this API from a browser: the
+# marketing site that embeds the chat widget, and this backend's own
+# domain. Previously allow_origins=["*"], which -- combined with
+# allow_credentials -- meant Starlette echoed back whatever Origin the
+# caller sent, so any site on the internet could call this API with the
+# visitor's credentials attached.
+#
+# These are exact-match origins. A different scheme, host, or port is a
+# different origin: "https://www.kaivixlab.com" and
+# "http://localhost:8000" are NOT covered by the entries below and must
+# be added explicitly if they are ever needed.
+ALLOWED_ORIGINS = [
+    "https://kaivixlab.com",
+    "https://kaivix-ai.onrender.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
