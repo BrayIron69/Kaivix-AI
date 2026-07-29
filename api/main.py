@@ -8,6 +8,7 @@ from api.routers.health import router as health_router
 from api.routers.leads import router as leads_router
 from api.routers.chat import router as chat_router
 from api.routers.calendar_oauth import router as calendar_oauth_router
+from api.routers.admin import router as admin_router
 
 
 app = FastAPI(
@@ -39,3 +40,4 @@ app.include_router(health_router)
 app.include_router(leads_router)
 app.include_router(chat_router)
 app.include_router(calendar_oauth_router)
+app.include_router(admin_router)

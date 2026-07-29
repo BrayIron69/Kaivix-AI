@@ -19,6 +19,10 @@ def register_exception_handlers(app: FastAPI):
                     "message": exc.detail,
                 },
             },
+            # Starlette's default handler forwards exc.headers; this one has
+            # to as well, or a 401 loses its WWW-Authenticate challenge and
+            # browsers never prompt for credentials (api/routers/admin.py).
+            headers=getattr(exc, "headers", None),
         )
 
     @app.exception_handler(Exception)
