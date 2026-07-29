@@ -1,11 +1,14 @@
+import importlib
 import os
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+from scheduling import google_calendar_provider
 from scheduling.calendar_token_store import CalendarTokenStore
 from scheduling.google_calendar_provider import GoogleCalendarProvider, SCOPES
 
@@ -23,6 +26,25 @@ class _StubBusinessConfigRepository:
 
     def load(self, business_id):
         return SimpleNamespace(identity=SimpleNamespace(timezone=self._timezone))
+
+
+@contextmanager
+def _public_base_url(base_url: str):
+    """
+    Sets PUBLIC_BASE_URL for the duration of the block and reloads
+    scheduling.google_calendar_provider so its module-level REDIRECT_URI
+    (read once at import time, per config.py's own pattern) picks up the
+    override -- monkeypatching os.environ alone wouldn't be enough,
+    since REDIRECT_URI is only computed once, not read fresh on every
+    call. Always reloads again on the way out (even on error) so a
+    later test never sees a leftover REDIRECT_URI from a previous test.
+    """
+    try:
+        with patch.dict("os.environ", {"PUBLIC_BASE_URL": base_url}):
+            importlib.reload(google_calendar_provider)
+            yield
+    finally:
+        importlib.reload(google_calendar_provider)
 
 
 def _make_provider(token_store=None, business_config_repository=None):
@@ -44,15 +66,41 @@ class TestGoogleCalendarProviderAuthorizationUrl(unittest.TestCase):
         mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?state=business-a", "business-a")
         mock_from_client_config.return_value = mock_flow
 
-        provider = _make_provider()
-        auth_url = provider.get_authorization_url("business-a")
+        with _public_base_url("https://test-deployment.example.com"):
+            provider = _make_provider()
+            auth_url = provider.get_authorization_url("business-a")
 
         self.assertEqual(auth_url, "https://accounts.google.com/o/oauth2/auth?state=business-a")
 
         _config, kwargs = mock_from_client_config.call_args
         self.assertEqual(kwargs["state"], "business-a")
         self.assertEqual(kwargs["scopes"], SCOPES)
-        self.assertEqual(kwargs["redirect_uri"], "http://localhost:8000/oauth/google/callback")
+        self.assertEqual(
+            kwargs["redirect_uri"],
+            "https://test-deployment.example.com/oauth/google/callback",
+        )
+
+    @patch("google_auth_oauthlib.flow.Flow.from_client_config")
+    def test_redirect_uri_falls_back_to_localhost_when_public_base_url_unset(
+        self, mock_from_client_config
+    ):
+        mock_flow = MagicMock()
+        mock_flow.authorization_url.return_value = ("https://accounts.google.com/o/oauth2/auth?state=business-a", "business-a")
+        mock_from_client_config.return_value = mock_flow
+
+        with patch.dict("os.environ", {}, clear=False):
+            os.environ.pop("PUBLIC_BASE_URL", None)
+            importlib.reload(google_calendar_provider)
+            try:
+                provider = _make_provider()
+                provider.get_authorization_url("business-a")
+            finally:
+                importlib.reload(google_calendar_provider)
+
+        _config, kwargs = mock_from_client_config.call_args
+        self.assertEqual(
+            kwargs["redirect_uri"], "http://localhost:8000/oauth/google/callback"
+        )
 
     @patch("google_auth_oauthlib.flow.Flow.from_client_config")
     def test_different_business_ids_get_different_state(self, mock_from_client_config):

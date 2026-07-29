@@ -27,16 +27,24 @@ _APPOINTMENT_DURATION = timedelta(minutes=30)
 # Must match the redirect URI registered in Google Cloud for this OAuth
 # client, and api/routers/calendar_oauth.py's /oauth/google/callback route.
 #
-# Local development note: this is plain HTTP on localhost. oauthlib
-# refuses any non-HTTPS redirect unless OAUTHLIB_INSECURE_TRANSPORT=1 is
-# set in the environment -- set that yourself (e.g. in your local .env)
-# when running against localhost, the same way
-# scripts/verify_google_calendar.py does. This module deliberately does
-# NOT set it: that is a dev-environment concern, not something this
-# module should decide for every caller. A real production deployment
-# must use a genuine HTTPS redirect URI registered in Google Cloud, and
-# OAUTHLIB_INSECURE_TRANSPORT must never be set there.
-REDIRECT_URI = "http://localhost:8000/oauth/google/callback"
+# Derived from PUBLIC_BASE_URL (read once at import time, same pattern as
+# config.py's other env-driven values) rather than hardcoded, so this is
+# correct per-deployment instead of always pointing at localhost --
+# Render (and any other real deployment) needs its own real base URL
+# here, not the local dev one. Defaults to localhost:8000 when
+# PUBLIC_BASE_URL isn't set, so nothing breaks for existing local
+# testing.
+#
+# Local development note: localhost is plain HTTP. oauthlib refuses any
+# non-HTTPS redirect unless OAUTHLIB_INSECURE_TRANSPORT=1 is set in the
+# environment -- set that yourself (e.g. in your local .env) when
+# running against localhost, the same way scripts/verify_google_calendar.py
+# does. This module deliberately does NOT set it: that is a
+# dev-environment concern, not something this module should decide for
+# every caller. A real production deployment must use a genuine HTTPS
+# PUBLIC_BASE_URL registered in Google Cloud, and OAUTHLIB_INSECURE_TRANSPORT
+# must never be set there.
+REDIRECT_URI = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000") + "/oauth/google/callback"
 
 # Read + write, unlike the throwaway verify script's read-only scope --
 # booking (a later milestone) needs to create events, not just read them.

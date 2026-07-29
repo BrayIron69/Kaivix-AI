@@ -1,0 +1,16 @@
+.git
+.env
+__pycache__/
+**/__pycache__/
+*.pyc
+*.db
+tests/
+evals/
+docs/
+.pytest_cache
+venv/
+.venv/
+env/
+scheduling/calendar_tokens.db
+memory/*.db
+crm/*.db
