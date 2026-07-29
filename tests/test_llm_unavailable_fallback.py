@@ -35,7 +35,11 @@ from utils.exceptions import LLMUnavailableError
 from utils.llm import LLM
 
 
-SENTINEL_API_KEY = "gsk_TESTSENTINELKEY_do_not_log_me_1234567890"
+# Deliberately does NOT use Groq's real "gsk_" key prefix: this string is
+# committed, and a realistic-looking prefix trips secret scanners (GitHub
+# push protection would block the push). Its only job is to be a distinctive
+# needle we can assert is absent from the log output.
+SENTINEL_API_KEY = "NOT-A-REAL-KEY-llm-fallback-test-sentinel-0000"
 
 _REQUEST = httpx.Request(
     "POST", "https://api.groq.com/openai/v1/chat/completions"
