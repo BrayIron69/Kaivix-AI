@@ -7,3 +7,9 @@ PyYAML>=6.0
 google-auth>=2.29.0
 google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.126.0
+
+# Nothing imports "tzdata" by name -- stdlib zoneinfo reads it. Required
+# wherever the OS ships no IANA tz database (Windows has none: TZPATH is
+# empty), or ZoneInfo() raises ZoneInfoNotFoundError. Needed by
+# scheduling/google_calendar_provider.py in production, not just tests.
+tzdata>=2024.1
