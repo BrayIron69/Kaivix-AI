@@ -15,9 +15,10 @@ from api.main import ALLOWED_ORIGINS, app
 
 DISALLOWED_ORIGINS = [
     "https://evil.example.com",
-    "http://kaivixlab.com",          # wrong scheme
+    "http://kaivixlab.com",           # wrong scheme
+    "http://www.kaivixlab.com",       # wrong scheme
     "https://kaivixlab.com.evil.io",  # suffix attack
-    "https://sub.kaivixlab.com",     # different host
+    "https://sub.kaivixlab.com",      # a subdomain, but not www
     "null",
 ]
 
@@ -26,11 +27,58 @@ class TestCorsAllowlist(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
-    def test_allowlist_is_the_two_known_origins(self):
+    def test_allowlist_is_the_three_known_origins(self):
         self.assertEqual(
             ALLOWED_ORIGINS,
-            ["https://kaivixlab.com", "https://kaivix-ai.onrender.com"],
+            [
+                "https://kaivixlab.com",
+                "https://www.kaivixlab.com",
+                "https://kaivix-ai.onrender.com",
+            ],
         )
+
+    def test_www_marketing_origin_is_allowed(self):
+        """
+        The marketing site is served from www (the apex 308-redirects to
+        it), so www is the Origin real visitors' browsers send. Omitting
+        it silently breaks the embedded chat widget for everyone --
+        preflight is rejected and fetch fails in the browser with no
+        server-side error to notice.
+        """
+        response = self.client.get(
+            "/health", headers={"Origin": "https://www.kaivixlab.com"}
+        )
+
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://www.kaivixlab.com",
+        )
+
+    def test_chat_endpoint_preflight_succeeds_from_the_www_widget_origin(self):
+        """End-to-end shape of the actual widget call: chat_widget.html
+        POSTs JSON to /chat from the marketing site."""
+        response = self.client.options(
+            "/chat",
+            headers={
+                "Origin": "https://www.kaivixlab.com",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "https://www.kaivixlab.com",
+        )
+
+    def test_www_is_allowed_by_exact_match_not_subdomain_wildcard(self):
+        """www being allowed must not mean *.kaivixlab.com is allowed."""
+        response = self.client.get(
+            "/health", headers={"Origin": "https://sub.kaivixlab.com"}
+        )
+
+        self.assertIsNone(response.headers.get("access-control-allow-origin"))
 
     def test_allowed_origins_get_a_matching_allow_origin_header(self):
         for origin in ALLOWED_ORIGINS:

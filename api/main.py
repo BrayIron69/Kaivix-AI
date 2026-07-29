@@ -24,12 +24,21 @@ app = FastAPI(
 # caller sent, so any site on the internet could call this API with the
 # visitor's credentials attached.
 #
-# These are exact-match origins. A different scheme, host, or port is a
-# different origin: "https://www.kaivixlab.com" and
-# "http://localhost:8000" are NOT covered by the entries below and must
-# be added explicitly if they are ever needed.
+# These are exact-match origins -- a different scheme, host, or port is a
+# different origin, and there is no wildcard/subdomain matching.
+#
+# Both the apex and www are listed because the marketing site is served
+# from www: https://kaivixlab.com returns a 308 to
+# https://www.kaivixlab.com (verified against the live Vercel
+# deployment), so the Origin real visitors' browsers send is the www one.
+# Listing www alone would be enough today; the apex is kept so a direct
+# apex-origin request doesn't depend on redirect behavior staying put.
+#
+# Nothing else is covered. "http://localhost:8000" and any other
+# subdomain must be added explicitly if they are ever needed.
 ALLOWED_ORIGINS = [
     "https://kaivixlab.com",
+    "https://www.kaivixlab.com",
     "https://kaivix-ai.onrender.com",
 ]
 
