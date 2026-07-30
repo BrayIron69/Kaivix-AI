@@ -1187,6 +1187,145 @@ Examples
 
 
 
+# Decision #021
+
+## LLM Provider Failures Become a 503 at the API Boundary, Not an Unhandled 500
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+`utils/llm.py` called Groq with no exception handling, and nothing above it caught anything either. When the Groq quota was exhausted the call raised, and the catch-all handler in `api/handlers/exceptions.py` flattened it into `HTTP 500 {"message": "Internal Server Error"}`. This was observed live: `/chat` returned 500 to every visitor while `/health` stayed 200, because `/health` never touches the LLM — so nothing alerted.
+
+### Decision
+
+Three parts:
+
+1. `utils/llm.py` catches `GroqError` (the single base class for every Groq failure) and re-raises `utils.exceptions.LLMUnavailableError`, a provider-agnostic exception.
+2. `api/handlers/exceptions.py` registers a handler for `LLMUnavailableError` returning **503** with `Retry-After: 30` and a message naming a contact channel that does not depend on the AI.
+3. The failure log records the exception **class** and HTTP status, never `str(error)`.
+
+### Reasoning
+
+500 says "we have a bug"; 503 says "temporarily unavailable, retry" — the latter is true and actionable, and monitoring can distinguish it. Translating at the LLM boundary means nothing above `utils/llm.py` imports a vendor SDK to handle an outage, which is what makes Decision #022's registry possible.
+
+Logging the class rather than the message is deliberate: an `AuthenticationError` message can quote part of the API key. The class plus status (`RateLimitError`/429 vs `AuthenticationError`/401) is enough to diagnose and cannot leak.
+
+The translation is scoped to `GroqError` specifically, **not** a blanket `except Exception`. A genuine defect must keep surfacing as a defect rather than being dressed up as a soft outage and hidden from monitoring.
+
+### Consequences
+
+**Benefits**
+- An outage costs a slow reply, not a lead
+- The failure is visible in logs and distinguishable by status code
+- Secrets cannot reach the log on the failure path
+
+**Trade-offs**
+- Does not retry or fail over to a second provider; it degrades and tells the visitor. Failover needs a second provider to exist first.
+
+---
+
+# Decision #022
+
+## Provider Selection Goes Through a Registry; Knowledge Is Deliberately Excluded
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+`config/businesses/<id>/providers.yaml` carried `llm_provider`, `crm_provider`, `calendar_provider` and `knowledge_provider`, and `BusinessConfig` validated all four — but nothing ever read them. `ConversationEngine` did `self.llm = LLM()` and `self.lead_service = LeadService()`, and `LeadService.__init__` hardcoded `SQLiteCRM()`. Every business got Groq + SQLite regardless of what its config said.
+
+### Decision
+
+`llm_provider` and `crm_provider` now resolve through name-to-class registries (`utils/llm_provider.py`, `crm/registry.py`). `ConversationEngine.__init__` reads both from `business_config.providers`. An unrecognised name raises at construction.
+
+`knowledge_provider` is **not** wired up. `calendar_provider` remains as-is.
+
+`BaseCRM` was expanded from one abstract method to the five `LeadService` actually calls.
+
+### Reasoning
+
+The LLM had exactly one call site and one method (`generate`), so the seam is one method wide — a second provider implements `generate`, registers itself, and `ConversationEngine` is never edited.
+
+CRM already had a `BaseCRM` ABC and a single hardcoding point, so it supported the same pattern cleanly. But `BaseCRM` declared only `save_lead` while `LeadService` calls five methods — a second implementation could satisfy the ABC and still crash the first time anything read a lead back. Completing the interface was a precondition, not a nice-to-have. `crm/hubspot.py` and `crm/gohighlevel.py` exist but are empty files, so `sqlite` remains the only registered CRM.
+
+Knowledge was excluded because the existing code does not cleanly support it yet, on three counts: there is no ABC and no second implementation, so the abstraction would be invented rather than wired up; `_load_documents` hardcodes filesystem globbing and consumers read `knowledge.documents` directly, so the seam is wider than one method; and **two config fields already compete for the same decision** — `knowledge.source_type` in `knowledge.yaml` and `providers.knowledge_provider` — with nothing specifying which is authoritative. Picking one silently would bake in a guess. That ambiguity should be resolved before the abstraction is built.
+
+Unknown names fail loudly rather than falling back to the default, because silently serving a different provider than the one recorded in config is worse than refusing to start.
+
+### Consequences
+
+**Benefits**
+- `providers.yaml` means something for two of its four fields
+- A second LLM or CRM provider requires no change to `ConversationEngine`
+- "Implements `BaseCRM`" now means "usable by `LeadService`"
+
+**Trade-offs**
+- `knowledge_provider` and `calendar_provider` are still decorative; the duplicate-knowledge-config question is deferred, not answered
+- Provider errors now surface at engine construction rather than at first use
+
+---
+
+# Decision #023
+
+## Multi-Business Serving Lives Entirely in ChatService; Decision #011 Stands
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+Decision #011 bound `business_id` once at `ConversationEngine.__init__` and recorded that "real multi-tenant serving (one process handling many businesses) is an explicitly deferred future phase", predicting that `process_message` would need its own `business_id` parameter when that phase arrived.
+
+That phase has now been implemented, minimally, against a synthetic second business.
+
+### Decision
+
+`ChatService` holds `dict[business_id, ConversationEngine]`, constructed lazily on first request per business and reused after. `POST /chat/{business_id}` was added. The plain `POST /chat` endpoint is unchanged and continues to serve `DEFAULT_BUSINESS_ID`.
+
+No engine-level file was modified.
+
+### Reasoning
+
+Decision #011's prediction turned out to be wrong in a useful way: `process_message` did **not** need a `business_id` parameter. Because every component below `ConversationEngine` was already `business_id`-scoped, multi-business serving was achieved by holding *several* engines rather than by changing how any one engine binds its business. #011's actual decision — bind once at construction, don't thread it through `process_message` — is therefore validated, not superseded, and remains in force. Only its "will need to be revisited" caveat is retired.
+
+Engines are built lazily because a business nobody has messaged should cost nothing, and loading every configured business's knowledge base at startup would make process boot scale with the customer list.
+
+An unknown `business_id` in the URL returns 404, not 500: a typo'd path is a client error, and `BusinessConfigError` would otherwise reach the catch-all handler.
+
+The synthetic test business is an in-test `SimpleNamespace` plus a temp directory. No `config/businesses/test-business-b/` was created — no real second business exists, and committing config for a fake one would leave misleading artifacts.
+
+### Consequences
+
+**Benefits**
+- One process can serve many businesses; the capability is proven, not assumed
+- The live widget needs zero changes — it posts to plain `/chat`, byte-identical behaviour
+- Confirms the #011-era scoping work was genuinely complete
+
+**Trade-offs**
+- Config errors now surface on a business's first request rather than at import. This also means one business's broken config can no longer stop the process serving everyone else — a deliberate exchange of fail-fast for blast-radius containment.
+- Engines are cached for process lifetime with no eviction. Fine for a handful of businesses; a real tenant list would want a bounded cache.
+- Nothing authenticates `business_id`. Any caller can address any configured business. Acceptable while every configured business is our own; a prerequisite before third parties can reach this endpoint.
+
+---
+
 \---
 
 
