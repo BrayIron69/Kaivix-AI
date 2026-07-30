@@ -2,18 +2,24 @@ from groq import Groq, GroqError
 
 from config import Config
 from utils.exceptions import LLMUnavailableError
+from utils.llm_provider import BaseLLMProvider
 from utils.logger import Logger
 
 
-class LLM:
+class LLM(BaseLLMProvider):
     """
-    Unified LLM interface.
+    Groq implementation of BaseLLMProvider.
 
     This class has one responsibility:
     send a list of chat messages to the model and
     return the assistant's response.
 
     All prompt construction belongs in PromptBuilder.
+
+    Kept at this name and import path deliberately: it is the "groq" entry
+    in the provider registry (utils/llm_provider.py), and evals plus a
+    number of tests construct utils.llm.LLM directly. Renaming it would buy
+    nothing and break both.
     """
 
     def __init__(self):

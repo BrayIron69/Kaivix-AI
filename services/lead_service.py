@@ -1,6 +1,8 @@
-from crm.sqlite_crm import SQLiteCRM
 from core_ai.business_config import DEFAULT_BUSINESS_ID
+from crm.base_crm import BaseCRM
+from crm.registry import get_crm_provider
 
+DEFAULT_CRM_PROVIDER = "sqlite"
 
 _PLACEHOLDER_VALUES = {"string", "none", "null"}
 
@@ -13,8 +15,23 @@ class LeadService:
     application should use for lead persistence.
     """
 
-    def __init__(self):
-        self.crm = SQLiteCRM()
+    def __init__(
+        self,
+        crm_provider: str = DEFAULT_CRM_PROVIDER,
+        crm: BaseCRM | None = None,
+    ):
+        """
+        Parameters
+        ----------
+        crm_provider : str
+            Name from business_config.providers.crm_provider. Defaults to
+            "sqlite", so LeadService() with no arguments behaves exactly as
+            it did when SQLiteCRM was hardcoded here.
+        crm : BaseCRM, optional
+            A ready-made CRM instance, used in preference to crm_provider.
+            Lets tests inject a double without going through the registry.
+        """
+        self.crm = crm if crm is not None else get_crm_provider(crm_provider)
 
     def _clean_text(self, value):
         if value is None:

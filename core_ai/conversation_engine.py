@@ -5,7 +5,7 @@ from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_I
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.lead_profile import LeadProfile
 from knowledge.knowledge_base import KnowledgeBase
-from utils.llm import LLM
+from utils.llm_provider import get_llm_provider
 from memory.conversation_memory import ConversationMemory
 
 from core_ai.decision_engine import DecisionEngine
@@ -88,7 +88,13 @@ class ConversationEngine:
 
         self.memory = ConversationMemory(business_id=self.business_id)
         self.knowledge = KnowledgeBase(business_config=self.business_config)
-        self.llm = LLM()
+
+        # providers.yaml is now read rather than merely validated. Both
+        # fields resolve through a registry, so adding a provider never
+        # touches this file -- see utils/llm_provider.py and crm/registry.py.
+        # An unrecognised name raises here, at construction, instead of
+        # silently serving Groq/SQLite under a different name in config.
+        self.llm = get_llm_provider(self.business_config.providers.llm_provider)
         self.logger = Logger()
 
         self.decision_engine = DecisionEngine()
@@ -98,7 +104,9 @@ class ConversationEngine:
         self.planning_engine = PlanningEngine(business_config=self.business_config)
         self.qualification_engine = QualificationEngine(business_config=self.business_config)
         self.prompt_builder = PromptBuilder()
-        self.lead_service = LeadService()
+        self.lead_service = LeadService(
+            crm_provider=self.business_config.providers.crm_provider
+        )
         self.calendar_provider = GoogleCalendarProvider()
 
         # Coordinates WorkingMemory (every turn), ConversationSummary

@@ -203,6 +203,26 @@ class TestConversationEngineCrossBusiness(_IsolatedDatabasesMixin, unittest.Test
                 ]
             ),
             knowledge=SimpleNamespace(namespace=str(knowledge_dir)),
+            # ConversationEngine now resolves its LLM and CRM through
+            # providers.yaml rather than hardcoding Groq/SQLiteCRM, so
+            # `providers` joined the set of attributes it reads and this
+            # stand-in needs it to stay a faithful stand-in. The real
+            # pydantic BusinessConfig always has this section (ProvidersConfig
+            # has defaults for every field), so omitting it here would be the
+            # double diverging from the type it doubles -- not a reason to
+            # make the engine tolerate a config without it.
+            #
+            # Values match Kaivix's own providers.yaml: these tests are about
+            # persona/knowledge/CRM isolation, not provider selection, and
+            # keeping them on the real providers means they still exercise the
+            # same code paths as before. Provider dispatch itself is covered
+            # in tests/test_provider_selection.py.
+            providers=SimpleNamespace(
+                llm_provider="groq",
+                crm_provider="sqlite",
+                calendar_provider="none",
+                knowledge_provider="file",
+            ),
         )
 
         class _StubBusinessConfigRepository:
