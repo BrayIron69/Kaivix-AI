@@ -42,6 +42,47 @@ a scenario x run summary table.
   affect the exit code — read the transcript yourself for those.)
 - `2` — `GROQ_API_KEY` isn't configured; nothing ran.
 
+## Token budget — read this before trusting a FAIL
+
+A full pass is **~24 real LLM calls at ~2,600 tokens each, so ~62,000
+tokens**. Groq's on-demand tier enforces two separate token limits, measured
+2026-07-30 on `llama-3.3-70b-versatile`:
+
+| Limit | Value | Behaviour |
+|---|---|---|
+| Tokens per minute (TPM) | 12,000 | Refills continuously. A full pass is ~5x this, so it **will** be hit. |
+| Tokens per day (TPD) | 100,000 | Rolling ~24h window. A full pass is ~62% of it. |
+
+The runner handles these differently, because they need opposite responses.
+A TPM block is waited out (short constant retry). A TPD block cannot be
+waited out inside a run, so the first call that exhausts its retries marks
+the provider hard-blocked and every remaining call fails immediately instead
+of re-waiting.
+
+**A `no_crash` FAIL is therefore ambiguous on its own**: it means either the
+engine genuinely raised, or the provider refused. Read the transcript — a
+rate-limited turn prints `[EXCEPTION] LLMUnavailableError ... status=429`,
+which is *not* an engine defect and is *not* evidence the check passed
+either. A scenario that never reached the model has **no result**, and
+reporting it as a pass is the specific mistake this section exists to
+prevent.
+
+Note that `429` is all this tool can see. The 429 *body* is what names the
+limit, the amount used, and the reset time — and `utils/llm.py` discards it
+deliberately (Decision #021: provider error text can quote part of an API
+key). To get the real numbers, call the API directly and print the error
+body; the runner tells you this when it detects a hard block.
+
+Use `--runs N` to shrink a pass when the budget is tight:
+
+```bash
+python evals/run_conversation_evals.py --runs 1
+```
+
+That is ~8 calls / ~21,000 tokens. Fewer runs is a weaker signal against LLM
+non-determinism, not a different check — a failure at `--runs 1` is still a
+real failure.
+
 ## Checks
 
 | Check | Fails when |

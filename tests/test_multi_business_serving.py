@@ -31,6 +31,7 @@ import memory.conversation_store as conversation_store_module
 import memory.long_term_memory as ltm_module
 from api.main import app
 from api.routers import chat as chat_router_module
+from auth.api_key_store import APIKeyStore
 from core_ai.business_config import DEFAULT_BUSINESS_ID
 from core_ai.conversation_engine import ConversationEngine
 from crm.sqlite_crm import SQLiteCRM
@@ -169,6 +170,47 @@ class _MultiBusinessMixin(_IsolatedDatabasesMixin):
         )
 
         self.client = TestClient(app)
+        self._isolate_api_keys()
+
+    def _isolate_api_keys(self):
+        """
+        Point the chat router's APIKeyStore at a fresh temp file and issue a
+        key for business-b.
+
+        POST /chat/{business_id} requires a valid key per business (see
+        tests/test_chat_business_auth.py); these tests are about routing and
+        isolation, not about auth, so they authenticate legitimately via
+        auth_headers() and assert on what happens afterwards. Nothing here
+        touches the real auth/api_keys.db.
+        """
+        fd, db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(db_path)
+
+        self.key_store = APIKeyStore(db_path=db_path)
+        self._issued_keys = {}
+
+        original_store = chat_router_module.api_key_store
+        chat_router_module.api_key_store = self.key_store
+
+        def _restore():
+            chat_router_module.api_key_store = original_store
+            if os.path.exists(db_path):
+                os.remove(db_path)
+
+        self.addCleanup(_restore)
+
+    def auth_headers(self, business_id: str = BUSINESS_B) -> dict:
+        """
+        A valid X-API-Key header for business_id, issuing one on first use.
+
+        The plaintext is cached here because the store only ever returns it
+        once, at issue time -- there is no way to read it back.
+        """
+        if business_id not in self._issued_keys:
+            self._issued_keys[business_id] = self.key_store.issue_key(business_id)
+
+        return {"X-API-Key": self._issued_keys[business_id]}
 
 
 class TestEngineCacheBehaviour(_MultiBusinessMixin, unittest.TestCase):
@@ -219,6 +261,7 @@ class TestPerBusinessRoute(_MultiBusinessMixin, unittest.TestCase):
         response = self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": "b_conv_1", "message": "Do you take Delta Dental?"},
+            headers=self.auth_headers(),
         )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["success"])
@@ -227,6 +270,7 @@ class TestPerBusinessRoute(_MultiBusinessMixin, unittest.TestCase):
         response = self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": "b_conv_2", "message": "Hello"},
+            headers=self.auth_headers(),
         )
 
         body = response.json()["response"]
@@ -240,6 +284,7 @@ class TestPerBusinessRoute(_MultiBusinessMixin, unittest.TestCase):
         response = self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": "b_conv_3", "message": "insurance and hours"},
+            headers=self.auth_headers(),
         )
 
         self.assertIn("Delta Dental", response.json()["response"])
@@ -252,6 +297,7 @@ class TestPerBusinessRoute(_MultiBusinessMixin, unittest.TestCase):
         scoped = self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": "shape_b", "message": "Hi"},
+            headers=self.auth_headers(),
         ).json()
 
         self.assertEqual(set(plain.keys()), set(scoped.keys()))
@@ -261,10 +307,17 @@ class TestPerBusinessRoute(_MultiBusinessMixin, unittest.TestCase):
         """
         A typo'd business_id in the URL is a client error. Without explicit
         handling, BusinessConfigError would surface as a bare 500.
+
+        Authenticated, because auth now runs in front of business resolution:
+        an *unauthenticated* request for an unknown business_id gets 401, so
+        that this endpoint cannot be used to enumerate business_ids (covered
+        in tests/test_chat_business_auth.py). The 404 is what an authorized
+        caller sees when their own business's config is broken.
         """
         response = self.client.post(
             "/chat/no-such-business",
             json={"conversation_id": "missing_1", "message": "Hi"},
+            headers=self.auth_headers("no-such-business"),
         )
 
         self.assertEqual(response.status_code, 404)
@@ -362,6 +415,7 @@ class TestCrossBusinessLeadIsolation(_MultiBusinessMixin, unittest.TestCase):
                 "conversation_id": "b_lead_1",
                 "message": f"Hi, I'm Nadia and my email is {email}.",
             },
+            headers=self.auth_headers(),
         )
 
         crm = SQLiteCRM()
@@ -416,6 +470,7 @@ class TestCrossBusinessLeadIsolation(_MultiBusinessMixin, unittest.TestCase):
                 "conversation_id": "shared_b",
                 "message": f"Hi, I'm Beename and my email is {shared}.",
             },
+            headers=self.auth_headers(),
         )
 
         crm = SQLiteCRM()
@@ -447,6 +502,7 @@ class TestNoStateLeakBetweenEngines(_MultiBusinessMixin, unittest.TestCase):
         self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": shared_conversation_id, "message": "BUSINESS_B_ONLY_MARKER"},
+            headers=self.auth_headers(),
         )
 
         kaivix_history = self.service.get_engine(DEFAULT_BUSINESS_ID).memory.get_conversation(
@@ -500,6 +556,7 @@ class TestNoStateLeakBetweenEngines(_MultiBusinessMixin, unittest.TestCase):
                 "conversation_id": shared_conversation_id,
                 "message": "I'm Bee Person, email bp@example.com",
             },
+            headers=self.auth_headers(),
         )
 
         kaivix_profiles = self.service.get_engine(DEFAULT_BUSINESS_ID)._lead_profiles
@@ -562,6 +619,7 @@ class TestMessageLengthCap(_MultiBusinessMixin, unittest.TestCase):
         response = self.client.post(
             f"/chat/{BUSINESS_B}",
             json={"conversation_id": "len_b", "message": "x" * (MAX_MESSAGE_LENGTH + 1)},
+            headers=self.auth_headers(),
         )
         self.assertEqual(response.status_code, 400)
 

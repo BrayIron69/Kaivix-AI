@@ -1322,7 +1322,171 @@ The synthetic test business is an in-test `SimpleNamespace` plus a temp director
 **Trade-offs**
 - Config errors now surface on a business's first request rather than at import. This also means one business's broken config can no longer stop the process serving everyone else — a deliberate exchange of fail-fast for blast-radius containment.
 - Engines are cached for process lifetime with no eviction. Fine for a handful of businesses; a real tenant list would want a bounded cache.
-- Nothing authenticates `business_id`. Any caller can address any configured business. Acceptable while every configured business is our own; a prerequisite before third parties can reach this endpoint.
+- Nothing authenticates `business_id`. Any caller can address any configured business. Acceptable while every configured business is our own; a prerequisite before third parties can reach this endpoint. **(Closed by Decision #024.)**
+
+---
+
+# Decision #024
+
+## Per-Business API Keys Authenticate `/chat/{business_id}`; Plain `/chat` Stays Open By Design
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+Decision #023 shipped `POST /chat/{business_id}` and recorded, as an explicit trade-off, that "nothing authenticates `business_id`. Any caller can address any configured business." That was acceptable only while every configured business was our own. It is the single gap standing between the current code and a third party's `business_id` existing in `config/businesses/`.
+
+The exposure was not merely "an unauthorized party can chat". Because the route resolves config and constructs a `ConversationEngine` for whatever id is in the path, an anonymous caller could also spend our LLM budget under any tenant's persona, write leads into that tenant's CRM rows, and enumerate which `business_id`s exist by reading 404-vs-200.
+
+### Decision
+
+Four parts:
+
+1. `auth/api_key_store.py` — a tenant-scoped SQLite store, `business_id` as PRIMARY KEY, one active key per business. Only a **SHA-256 hash** of the key is stored; verification hashes the presented value and compares with `secrets.compare_digest`.
+2. `POST /chat/{business_id}` requires a valid `X-API-Key` **for that specific `business_id`**, enforced as a FastAPI dependency so it completes before the handler body.
+3. `POST /chat` (no `business_id`) remains completely unauthenticated and byte-identical.
+4. `scripts/issue_api_key.py <business_id>` issues or rotates a key, printing the plaintext once. A key has been issued for `kaivix`.
+
+Every rejection is the same 401: missing header, wrong key, another business's key, or a business with no key provisioned.
+
+### Reasoning
+
+**Why hashed at rest, and why SHA-256 rather than bcrypt/argon2.** A stolen database read must not yield a usable credential — the same reason `api/routers/admin.py` never stores a comparable secret and compares in constant time. But a slow KDF is the wrong tool here: bcrypt and argon2 exist to make brute force expensive against *low-entropy human-chosen passwords*. These keys are 32 bytes of `os.urandom`, so there is no dictionary to run, and a deliberately slow hash would instead tax every `/chat` request on the hot path. Constant-time comparison is the property that matters, and it is used.
+
+**Why the key is scoped to `business_id`, not global.** A single shared secret would authenticate the *caller* and not the *business*, which is the failure mode that looks like it works: tenant A's valid key would let tenant A hold conversations as tenant B, write into B's CRM, and read B's knowledge base. The store looks up by `business_id` before any comparison, so a key is valid for exactly one business. Four tests assert this directly, including the realistic case of our own production key being tried against another business.
+
+**Why auth runs before business resolution.** Two reasons. An unauthorized request now costs nothing — no config load, no knowledge-base read, no engine construction — which removes an unauthenticated compute-amplification path. And an unknown `business_id` returns the same 401 as a known one, so the endpoint is no longer an oracle for which businesses exist. This does change #023's observable behaviour: an *unauthenticated* request for an unknown id now gets 401 rather than 404. #023's 404-not-500 handling is untouched and still reachable for an authorized caller whose own config is broken, which is who that status was always meant for; both paths are tested.
+
+**Why an unprovisioned business is closed rather than open.** Treating "no key on record" as "no key required" is the classic authentication bypass, and it would mean adding a business to `config/businesses/` silently published an open endpoint. Unconfigured means denied, matching admin auth's "no default credentials" stance.
+
+**Why plain `/chat` must stay unauthenticated.** This is not a concession, it is the correct design. `chat_widget.html` is client-side JavaScript on the public marketing site, served to anonymous visitors. Any key shipped to it would be readable in view-source by anyone, so authenticating that route would add no security while guaranteeing an outage the moment it was enforced. The public widget's threat model is abuse control (the message-length cap from #023, rate limiting later), not authentication. A byte-identical-output test runs against this route with the auth layer installed, so the guarantee is checked rather than asserted.
+
+**Why a script rather than an admin-dashboard screen.** No real second business exists. A management UI would be scaffolding for a problem that has not arrived, and a browser-reachable credential-minting button is a larger attack surface than a command requiring shell access to the host. The script refuses an unrecognised `business_id` by default, because a key issued for a typo'd id is silently useless.
+
+### Consequences
+
+**Benefits**
+- A third party's `business_id` can now exist in `config/businesses/` without publishing an open endpoint for it
+- A leaked key compromises exactly one business, and rotation is one command
+- A database read yields no usable credential
+- Unauthenticated callers can no longer enumerate `business_id`s or spend LLM budget
+
+**Trade-offs**
+- One key per business, so there is no way to run two valid keys during a rotation window; rotation is a hard cutover. Fine while keys are handed over by hand, and a second row per business is the obvious extension when it isn't.
+- No expiry, no scopes, no per-key rate limiting, and no usage attribution beyond "this business's key was accepted".
+- `auth/api_keys.db` is another SQLite file to back up alongside `crm/leads.db` and `scheduling/calendar_tokens.db`. Losing it locks every business out until keys are re-issued.
+- Plain `/chat` remains an unauthenticated LLM-spending endpoint. That is inherent to a public widget and is bounded by the message-length cap, not by auth; per-IP rate limiting is the real answer and is not built yet.
+
+---
+
+# Decision #025
+
+## `providers.knowledge_provider` Is Authoritative; `knowledge.source_type` Is Removed
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+Two config fields claimed the same decision — which backend reads a business's knowledge:
+
+- `knowledge.source_type` in `config/businesses/<id>/knowledge.yaml`
+- `providers.knowledge_provider` in `config/businesses/<id>/providers.yaml`
+
+Both were validated by `BusinessConfig`. Neither was read by anything. Nothing recorded which one would win. Decision #022 named this ambiguity as one of the three reasons knowledge was kept out of the provider registry, and deliberately left it unresolved rather than picking silently.
+
+### Decision
+
+`providers.knowledge_provider` is authoritative. `source_type` is removed from `KnowledgeConfig` and from Kaivix's `knowledge.yaml`.
+
+`knowledge.yaml` keeps `namespace` — *where the corpus lives* — which is a different question from *what reads it* and was never in conflict.
+
+### Reasoning
+
+`providers.yaml` is where backend selection already lives, and the consistency argument is one-sided. It holds all four choices under one `*_provider` naming convention, and two of them (`llm_provider`, `crm_provider`) already resolve through real registries as of Decision #022. Keeping the knowledge backend in a different file, under a different naming convention, would mean the answer to "which backends is this business using?" required reading two files and knowing that one field was special. `source_type` also names a *kind of source* rather than a provider, which is a subtly different concept and part of why the duplication went unnoticed.
+
+Removing the field rather than leaving it as a documented no-op: an inert field that looks live is the thing that created this problem. Pydantic ignores unknown keys, so a `source_type:` line left in any existing `knowledge.yaml` is silently inert — the removal cannot break a config that still carries one. A test asserts exactly that, and another asserts the key has not been reintroduced into Kaivix's own file.
+
+**This changes no behaviour.** Neither field was ever read; `knowledge_provider` is still not wired to a registry, for the reasons #022 gave (no ABC, no second implementation, and `_load_documents` hardcodes filesystem globbing while consumers read `knowledge.documents` directly). What changes is that when that abstraction is built, there is one field to read and no guess to make. Tests assert Kaivix's namespace, loaded document set, and retrieval output are unchanged.
+
+### Consequences
+
+**Benefits**
+- One field, in one file, decides each backend
+- Decision #022's blocker on wiring up knowledge is cleared; only the code-shape work remains
+- A stale `source_type` cannot be mistaken for a live setting
+
+**Trade-offs**
+- `knowledge_provider` is still decorative. This resolves which field is authoritative, not the absence of a knowledge abstraction — a reader could mistake "authoritative" for "wired up", which is why both this entry and `providers.yaml` state plainly that it is not.
+- Pydantic's ignore-unknown-keys behaviour is what makes the removal safe, and it also means a *typo'd* provider field anywhere in these configs is silently ignored rather than rejected. Pre-existing, not introduced here, but this decision leans on it.
+
+---
+
+# Decision #026
+
+## Logs Mask Direct Identifiers and Keep Qualification Data
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+`Logger.log_lead` wrote a captured lead's name, email, business, budget, timeline and pain point to `logs/app.log` verbatim. That file is plaintext, not access-controlled, copied around with the repo directory, never rotated, and included in any careless directory copy or container image. It amounted to an append-only customer contact list sitting beside the code.
+
+The exposure was latent rather than active: `log_lead` currently has **no callers**, and the one `Lead Captured` line in the existing log has empty name/email fields. So this fixes a loaded gun before it fires rather than cleaning up a breach.
+
+### Decision
+
+`log_lead` now masks direct identifiers and keeps everything else:
+
+| Field | Treatment |
+|---|---|
+| `email` | First character of the local part + full domain (`n***@ridgeline-dental.com`) |
+| `name` | Initials (`N.O.`) |
+| `ref` | New: `sha256(business_id + email)[:12]`, a stable non-reversible handle |
+| `company`, `budget`, `timeline`, `pain_point` | Kept, length-bounded at 60 characters |
+
+### Reasoning
+
+The line drawn is **direct identifiers are masked; non-identifying qualification data is kept**. That is a rule someone can apply to the next field they add, which "redact PII" on its own is not.
+
+Dropping the whole line, or reducing it to an opaque id, would have been easier and worse: an operator reading the log needs to see that a lead was captured, roughly who, and with what qualification signal, or they will go add the fields back under pressure during an incident.
+
+The domain is deliberately kept while the local part is not. The domain is where the debugging value is — spotting a wave from one company, or a throwaway address — and it does not identify a person by itself.
+
+`ref` exists so removing the identifiers does not remove the ability to correlate. It is seeded with `business_id` as well as email because the CRM allows one address in two businesses as two distinct records (`UNIQUE(business_id, email)`), and a reference that collapsed them would be actively misleading. It is a correlation handle, not a secret: someone holding the log could confirm a *guessed* address by hashing it, since an email is low-entropy input. That is a far weaker capability than reading addresses off disk, and it is why the authoritative record stays in the CRM and admin dashboard.
+
+Truncation of the free-text fields is a length guard, not redaction, and the code says so. It stops one pasted essay from dominating the log; it does not make visitor-written text safe.
+
+### Consequences
+
+**Benefits**
+- No customer email address or full name is written to disk in the clear
+- The log remains useful for "was this lead captured, and what did it look like"
+- Lines about one lead can still be tied together, and to the full CRM record
+- The masking helpers are unit-tested independently of the log line
+
+**Trade-offs**
+- `pain_point` is visitor-written free text and is still logged. If a visitor types their phone number into it, that reaches the log. Bounding it is not sanitising it; treating every free-text field as unloggable is the stricter position and was not taken, because it would empty the line.
+- **`log_user` and `log_ai` in `app.py` still log whole conversation turns verbatim, which is the same class of exposure and a larger one** — a visitor message routinely contains a name and address. `logs/app.log` currently holds four such lines (test domains). Out of scope here and not fixed; `app.py` is the local CLI harness, not the FastAPI serving path, which is why it is lower priority rather than harmless.
+- No log rotation and no retention limit, so `app.log` still grows without bound and old entries are never aged out.
+- The reference is unsalted, so a guessed address can be confirmed against the log.
 
 ---
 

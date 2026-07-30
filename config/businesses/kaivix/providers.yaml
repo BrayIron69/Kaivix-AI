@@ -1,4 +1,14 @@
+# The single place every backend choice for this business is declared.
+#
+# Wired up (resolved through a registry at ConversationEngine construction;
+# an unrecognised name raises rather than falling back) -- Decision #022:
 llm_provider: groq
 crm_provider: sqlite
+
+# Not wired up yet: nothing reads these, and the value is not validated
+# against a registry. Recorded here so the choice has one home when the
+# abstraction is built -- see Decision #022 for why knowledge was excluded
+# from the registry, and Decision #025 for why this field, rather than
+# knowledge.yaml's former `source_type`, is the authoritative one.
 calendar_provider: none
 knowledge_provider: file

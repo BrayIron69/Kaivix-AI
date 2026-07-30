@@ -1,2 +1,7 @@
+# Which knowledge corpus this business uses: knowledge/<namespace>/*.md
 namespace: kaivix
-source_type: file
+
+# NOTE: the backend that READS this corpus is chosen by knowledge_provider in
+# providers.yaml, not here. A `source_type` key used to sit in this file
+# claiming the same decision; it was removed by Decision #025. Adding it back
+# does nothing -- it is silently ignored.

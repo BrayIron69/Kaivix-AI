@@ -70,8 +70,23 @@ class QualificationSchema(BaseModel):
 
 
 class KnowledgeConfig(BaseModel):
+    """
+    Where a business's knowledge lives -- but not what reads it.
+
+    There is deliberately no `source_type` here. It used to exist alongside
+    `providers.knowledge_provider` (providers.yaml), with both claiming to
+    select the knowledge backend and nothing stating which won. Decision #022
+    flagged that ambiguity as the reason knowledge was left out of the
+    provider registry; Decision #025 resolves it in favour of
+    `providers.knowledge_provider`, so that all four backend choices are
+    declared in one file, under one naming convention.
+
+    A stale `source_type:` key left in a knowledge.yaml is inert -- pydantic
+    ignores unknown keys -- so removing it here cannot break an existing
+    config.
+    """
+
     namespace: str
-    source_type: str = "file"
 
 
 class ToolsConfig(BaseModel):

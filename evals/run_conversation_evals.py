@@ -16,7 +16,9 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import argparse
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +32,7 @@ from config import Config  # noqa: E402
 from core_ai.conversation_engine import ConversationEngine  # noqa: E402
 from core_ai.conversation_plan import ConversationPlan  # noqa: E402
 from core_ai.prompt_builder import PromptBuilder  # noqa: E402
+from utils.exceptions import LLMUnavailableError  # noqa: E402
 from utils.llm import LLM  # noqa: E402
 
 # Reused directly from the unit test that guards KnowledgeBase's retrievable
@@ -42,6 +45,110 @@ from tests.test_pricing_knowledge_scoping import (  # noqa: E402
 )
 
 RUNS_PER_SCENARIO = 3
+
+# ----------------------------------------------------------------------
+# Rate-limit pacing
+# ----------------------------------------------------------------------
+#
+# Groq's on-demand tier enforces TWO token limits, and they need opposite
+# responses. Measured on llama-3.3-70b-versatile, 2026-07-30:
+#
+#   tokens per minute (TPM): 12,000, continuously refilling
+#   tokens per day   (TPD): 100,000, rolling ~24h window
+#
+# One eval turn costs ~2,600 tokens (the whole system prompt, including up
+# to three knowledge documents). So a 3-run pass is ~24 calls / ~62,000
+# tokens: comfortably inside TPD when the day is fresh, but ~5x the
+# per-minute budget, meaning TPM WILL be hit and is worth waiting out.
+#
+# TPD is the opposite: waiting cannot help within a run, and the response
+# says so (`x-should-retry: false`, `retry-after` in the tens of minutes).
+#
+# Only the 429 *body* distinguishes them, and utils/llm.py deliberately
+# discards it -- Decision #021, because provider error text can quote part
+# of an API key. That is the right call for production and it is why a TPD
+# block has previously been recorded here only as "quota blocked", with no
+# numbers: `reason` and `status_code` cannot tell the two apart.
+#
+# So this harness infers it from behaviour instead. A 429 is retried on a
+# short constant wait, which is all TPM needs. But if one call exhausts
+# every attempt, the provider is refusing sustained -- treat it as a hard
+# block and fail the remaining calls IMMEDIATELY rather than re-waiting the
+# full budget for each. Without that, a TPD-blocked run spends
+# attempts x backoff on all ~24 calls (over an hour) to learn what the
+# first call already established.
+#
+# A constant wait rather than exponential backoff: the TPM limiter is a
+# steadily refilling bucket with a single client, so there is no contention
+# to back off from -- only the question of whether enough has accumulated.
+# Exponential overshoots badly (measured: 20+40+60+80+100s of sleeping for
+# one call that needed ~40s).
+#
+# Anything that is NOT a 429 (auth failure, provider 5xx) still propagates
+# immediately and still fails the run. Those are real results.
+_RATE_LIMIT_MAX_ATTEMPTS = 4
+_RATE_LIMIT_BACKOFF_SECONDS = 20
+
+# Set once a call has exhausted its retries, so the rest of the run fails
+# fast instead of re-discovering the same block. Module-level because it is
+# a property of the provider account, not of any one scenario.
+_provider_hard_blocked = False
+
+
+def with_rate_limit_retry(generate):
+    """
+    Wrap a provider's `generate(messages)` so per-minute rate limiting
+    delays the eval instead of corrupting its result.
+
+    Only used by this eval tool. utils/llm.py is deliberately left alone:
+    Decision #021 made a 429 surface as a fast 503 to real visitors, and a
+    live web request must never block for a minute waiting on a retry.
+    """
+
+    def wrapped(messages):
+        global _provider_hard_blocked
+
+        for attempt in range(1, _RATE_LIMIT_MAX_ATTEMPTS + 1):
+            try:
+                return generate(messages)
+            except LLMUnavailableError as error:
+                if error.status_code != 429:
+                    raise
+
+                if _provider_hard_blocked:
+                    # Already established that waiting doesn't help.
+                    raise
+
+                if attempt == _RATE_LIMIT_MAX_ATTEMPTS:
+                    _provider_hard_blocked = True
+                    print(
+                        f"    [rate limit] still 429 after "
+                        f"{_RATE_LIMIT_MAX_ATTEMPTS} attempts "
+                        f"({_RATE_LIMIT_MAX_ATTEMPTS * _RATE_LIMIT_BACKOFF_SECONDS}s "
+                        f"of waiting). This is a sustained block, not "
+                        f"per-minute pacing -- most likely the daily token "
+                        f"budget. Remaining calls will fail immediately "
+                        f"rather than wait. Check the exact limit with:\n"
+                        f"      curl -s -w '%{{http_code}}' "
+                        f"https://api.groq.com/openai/v1/chat/completions "
+                        f"-H \"Authorization: Bearer $GROQ_API_KEY\" ...\n"
+                        f"    -- the 429 body names the limit, used, and "
+                        f"reset time; this tool never sees it (Decision "
+                        f"#021).",
+                        flush=True,
+                    )
+                    raise
+
+                print(
+                    f"    [rate limit] 429 from provider; waiting "
+                    f"{_RATE_LIMIT_BACKOFF_SECONDS}s for the per-minute token "
+                    f"bucket to refill (attempt {attempt}/"
+                    f"{_RATE_LIMIT_MAX_ATTEMPTS})",
+                    flush=True,
+                )
+                time.sleep(_RATE_LIMIT_BACKOFF_SECONDS)
+
+    return wrapped
 
 # Checks whose failure makes the whole eval run exit non-zero. non_empty
 # and the buying-signal mention are informational only (see Scenario /
@@ -326,12 +433,14 @@ def run_booking_confirmation_phrasing_check() -> list[RunResult]:
         {"role": "user", "content": "2"},
     ]
 
+    generate = with_rate_limit_retry(LLM().generate)
+
     run_results: list[RunResult] = []
     for run_index in range(RUNS_PER_SCENARIO):
         conversation_id = f"eval-booking_confirmation_phrasing-run{run_index + 1}-{uuid.uuid4().hex[:8]}"
 
         try:
-            response = LLM().generate(messages)
+            response = generate(messages)
         except Exception as exc:  # noqa: BLE001 -- eval tool must never crash
             run_results.append(
                 RunResult(
@@ -435,6 +544,34 @@ def print_summary_table(all_results: dict[str, list[RunResult]]) -> bool:
 
 
 def main() -> int:
+    global RUNS_PER_SCENARIO
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run the conversation-quality evals against the real LLM."
+        )
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=RUNS_PER_SCENARIO,
+        metavar="N",
+        help=(
+            "Runs per scenario (default: %(default)s). Lower this for a "
+            "faster pass when the provider's per-minute token budget is the "
+            "bottleneck -- 3 runs is ~24 large calls and the pacing waits "
+            "can make a full pass take tens of minutes. Fewer runs is a "
+            "weaker signal against LLM non-determinism, not a different "
+            "check: a failure at --runs 1 is still a real failure."
+        ),
+    )
+    args = parser.parse_args()
+
+    if args.runs < 1:
+        parser.error("--runs must be at least 1")
+
+    RUNS_PER_SCENARIO = args.runs
+
     if not Config.GROQ_API_KEY:
         print(
             "GROQ_API_KEY is not configured (checked via config.Config, "
@@ -445,6 +582,9 @@ def main() -> int:
         return 2
 
     engine = ConversationEngine()
+    # Every scenario turn goes through the engine's own provider, so wrapping
+    # it here covers all of them regardless of how many calls a turn makes.
+    engine.llm.generate = with_rate_limit_retry(engine.llm.generate)
 
     all_results: dict[str, list[RunResult]] = {}
     for scenario in SCENARIOS:
