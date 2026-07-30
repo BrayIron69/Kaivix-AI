@@ -6,7 +6,7 @@
 
 \*\*Status:\*\* Active
 
-\*\*Last Updated:\*\* 2026-07-25
+\*\*Last Updated:\*\* 2026-07-31
 
 
 
@@ -899,6 +899,38 @@ Every sub-feature shipped with dedicated tests, growing the suite from 33 to 93 
 ### Next Milestone
 
 Real end-to-end calendar connection + live booking verification, then continue Phase 2 (remaining: production testing, Docker deployment) or address the newly logged tools.yaml gap.
+
+---
+
+# Unlogged Work Since Milestone 5
+
+**Status**
+
+⚠️ Not a milestone entry. This section exists so this log does not imply Milestone 5 is the current state of the project.
+
+Substantial work landed between 2026-07-27 and 2026-07-31 carrying Decisions #021–#026, and no milestone entry was written for any of it. Whether it constitutes one milestone, two (hardening, then business auth), or work not yet at a milestone boundary has not been decided — so no entry has been invented here. See Open Questions in `docs/Current_Status.md`.
+
+All of it is now on `main` at `057b635` and pushed to `origin`. Suite grew 93 → 261 → **342 tests**, all passing.
+
+What landed, for the record:
+
+**Hardening and provider work** (Decisions #021–#023, suite 93 → 261):
+- Scheduling fixes: OAuth `code_verifier` persistence, numbered-slot presentation, appointment-length slot chunking, booking confirmation no longer reading as a leaked system instruction, `redirect_uri` from `PUBLIC_BASE_URL`.
+- Admin CRM dashboard behind Basic Auth, plus a `WWW-Authenticate` header fix.
+- Bug-fix sweep (`31cdebd`) closing three of Milestone 5's four open Known Issues: `delete_lead` scoping, `enabled_tools` gating, and the `_FIELD_QUESTIONS` duplication. Also intent misclassification, calendar token expiry, and CORS restriction including the `www` variant.
+- Decision #021 — LLM failures become a 503, not an unhandled 500. Fixed a real live outage where `/chat` returned 500 to every visitor while `/health` stayed 200.
+- Decision #022 — `providers.yaml` drives real LLM and CRM selection; `BaseCRM` completed from one abstract method to five as a precondition.
+- Decision #023 — multi-business serving via per-business engines in `ChatService`; Decision #011 validated rather than superseded. Message length capped.
+
+**Business authentication and privacy** (Decisions #024–#026, suite 261 → 342):
+- Decision #024 — per-business API keys on `POST /chat/{business_id}`, closing the authorization gap #023 recorded as an explicit trade-off. SHA-256 hash storage, `secrets.compare_digest` verification, enforced ahead of config loading, and no enumeration oracle on unknown `business_id`.
+- Decision #025 — `providers.knowledge_provider` made authoritative; `knowledge.source_type` removed. Resolves the ambiguity #022 deliberately left open.
+- Decision #026 — lead PII masked in `Logger.log_lead` (a latent exposure, no callers, not a breach).
+- Eval harness rate-limit pacing, `--runs N`, and measured token-budget documentation in `evals/README.md`.
+
+This work lived on `phase-5-business-auth-and-hardening` until 2026-07-31, when it was fast-forward merged into `main` (`724c161..057b635`) and the branch deleted. It had never been pushed to `origin`, so until that merge Decisions #024–#026 existed only on one local machine — worth noting as a lesson about where unpushed work is and is not backed up.
+
+Also open: the conversation-quality eval suite cannot complete a pass on Groq's free tier (~62,000 tokens per pass against a 100,000 token-per-day cap). Details in `docs/Current_Status.md`.
 
 ---
 

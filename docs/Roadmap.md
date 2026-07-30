@@ -6,7 +6,7 @@
 
 \*\*Status:\*\* Active
 
-\*\*Last Updated:\*\* 2026-07-25
+\*\*Last Updated:\*\* 2026-07-31
 
 
 
@@ -128,21 +128,33 @@ Completed
 
 
 
-\- BusinessConfig
+Updated 2026-07-30. Three items previously listed here are now done and have moved to Completed above:
 
-\- Appointment Scheduling
 
-\- Google Calendar Integration
+
+\- ~~BusinessConfig~~ — complete, refactoring backlog 7/7
+
+\- ~~Appointment Scheduling~~ — built and unit-tested; live end-to-end booking verification still pending
+
+\- ~~Google Calendar Integration~~ — built and unit-tested; live end-to-end booking verification still pending
+
+
+
+Genuinely remaining:
+
+
 
 \- Deployment
 
-\- Production Testing
+\- Production Testing — blocked on the conversation-quality eval suite being runnable (Groq free-tier token cap; see docs/Current\_Status.md)
+
+\- Live end-to-end booking verification against a real calendar
 
 \- UI Improvements
 
 \- Stability Improvements
 
-\- Error Handling
+\- Error Handling — partly addressed: LLM failures now degrade to a 503 rather than an unhandled 500 (Decision #021)
 
 \- Documentation
 
@@ -366,7 +378,7 @@ Status
 
 
 
-Future
+Future as a phase — but note that several of its features have already been built early, as a side effect of the BusinessConfig work rather than as a deliberate start on Phase 4.
 
 
 
@@ -382,11 +394,11 @@ Major Features
 
 
 
-\- Tenant Isolation
+\- Tenant Isolation — largely built. Every component below ConversationEngine is business\_id-scoped: CRM, LongTermMemory, ConversationMemory, KnowledgeBase namespacing, and calendar OAuth token storage. One process can serve many businesses (Decision #023).
 
-\- Authentication
+\- Authentication — built. Admin dashboard uses Basic Auth; POST /chat/{business\_id} requires a per-business X-API-Key, stored as a SHA-256 hash and verified with secrets.compare\_digest (Decision #024). Plain POST /chat stays unauthenticated by design — it carries the live widget's traffic. Not yet built: customer-facing key management, rotation policy, or any self-service issuance.
 
-\- Admin Dashboard
+\- Admin Dashboard — built for CRM lead viewing, behind Basic Auth.
 
 \- Customer Dashboard
 
@@ -395,6 +407,10 @@ Major Features
 \- Usage Tracking
 
 \- User Management
+
+
+
+Caveat: multi-business serving is proven against a synthetic in-test second business only. No real second business config exists, and engines are cached per process with no eviction.
 
 
 
