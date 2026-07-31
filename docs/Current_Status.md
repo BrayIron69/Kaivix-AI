@@ -33,10 +33,10 @@ Kaivix Core is a reusable AI Employee platform designed to allow businesses to d
 AI Employee Version 1 (Roadmap Phase 1). Note: this document has historically called the current work "Phase 2", meaning the second half of AI Employee V1. `docs/Roadmap.md` uses "Phase 2" to mean Customer Validation. See Open Questions — the two documents disagree on the label, not on the work.
 
 **Current Milestone**
-Milestone 5 (Production Hardening & Appointment Scheduling) — complete, 2026-07-26. The work since then (bug-fix sweep, admin dashboard, LLM 503 fallback, provider registry, multi-business serving, per-business API keys, PII redaction — Decisions #021–#026) has **no milestone entry in `docs/Milestone_Log.md`** and no agreed name. See Open Questions.
+Milestone 5 (Production Hardening & Appointment Scheduling) — complete, 2026-07-26. The work since then (bug-fix sweep, admin dashboard, LLM 503 fallback, provider registry, multi-business serving, per-business API keys, PII redaction — Decisions #021–#027) has **no milestone entry in `docs/Milestone_Log.md`** and no agreed name. See Open Questions.
 
 **Overall Progress**
-🟩 BusinessConfig refactoring backlog complete (7/7). 🟩 Milestone 5 complete. 🟩 Post-Milestone-5: three of the four then-open Known Issues are now closed, an admin CRM dashboard exists, LLM provider failures degrade to a 503 instead of a 500, `providers.yaml` actually drives LLM and CRM selection, one process can serve many businesses, and `POST /chat/{business_id}` is authenticated per business. **342 automated tests passing** (verified by running `python -m unittest discover -s tests` on 2026-07-31, not carried over from a previous doc revision).
+🟩 BusinessConfig refactoring backlog complete (7/7). 🟩 Milestone 5 complete. 🟩 Post-Milestone-5: three of the four then-open Known Issues are now closed, an admin CRM dashboard exists, LLM provider failures degrade to a 503 instead of a 500, `providers.yaml` actually drives LLM and CRM selection, one process can serve many businesses, `POST /chat/{business_id}` is authenticated per business, and conversation turns are withheld from logs by default. **384 automated tests passing** (verified by running `python -m unittest discover -s tests` on 2026-07-31, not carried over from a previous doc revision).
 
 Not yet done: a real end-to-end booking test against a live calendar, and deployment + production testing. The conversation-quality eval suite is currently **unrunnable** against Groq's free tier — see Known Issues.
 
@@ -104,6 +104,7 @@ Not yet done: a real end-to-end booking test against a live calendar, and deploy
 - ✅ `scripts/issue_api_key.py` issues/rotates a key and refuses a `business_id` with no valid config. A key has been issued for `kaivix`
 - ✅ Knowledge provider conflict resolved (Decision #025) — `providers.knowledge_provider` is authoritative and `knowledge.source_type` is removed, so all four backend choices live in `providers.yaml` under one naming convention. A stale `source_type` key is inert (pydantic ignores unknown keys), so no existing config breaks
 - ✅ Lead PII masked in logs (Decision #026) — `Logger.log_lead` reduces email to first char + domain and name to initials, adds a non-reversible correlation ref, and keeps bounded qualification data. `log_lead` had no callers, so this closed a latent exposure rather than a breach
+- ✅ Conversation turns withheld from logs by default (Decision #027) — closes the trade-off #026 left open. Checking the log corrected #026's premise: three of four leaked lines came from `ConversationEngine._log_turn` on the live serving path, not from the CLI harness `log_user`/`log_ai` calls #026 had scoped to. `log_user`/`log_ai` bodies are now withheld outright; `_log_turn`'s structured fields (stage, intent, goal, completion, missing field names) are kept in full, while its free-text `conversation_summary` narrative is withheld and its `working_memory.summary` is swept for addresses and bounded. `KAIVIX_LOG_CONVERSATION_BODIES=1` re-enables bodies for debugging; masking and bounding still apply even then
 
 ## Google Calendar Integration
 - ✅ Provider interface + tenant-scoped OAuth token storage (`scheduling/base_calendar_provider.py`, `scheduling/google_calendar_provider.py`, `scheduling/calendar_token_store.py`), one connection per business, shared app-level OAuth credentials
@@ -163,7 +164,7 @@ Items:
 **Priority:** High
 
 ## Milestone: Business Authentication & Hardening
-**Status:** Complete and merged to `main` (2026-07-31) — per-business API keys (#024), knowledge provider authority (#025), lead PII redaction (#026)
+**Status:** Complete and merged to `main` (2026-07-31) — per-business API keys (#024), knowledge provider authority (#025), lead PII redaction (#026), conversation turns withheld from logs by default (#027)
 **Priority:** Was High — #024 was the prerequisite before any third party's `business_id` could exist
 
 ## Milestone: Production Deployment
@@ -226,7 +227,7 @@ Practical options: pace a pass across days, trim the scenario set, or move the e
 **Owner:** Scheduling
 **Priority:** High — recommended before real site visitors reach this feature
 
-Every calendar/booking behavior is proven with mocked unit tests (Google API and LLM calls fully mocked, 342 passing); the OAuth setup itself was separately verified with a real browser consent flow (confirmed real calendars listed). A full, deliberate end-to-end run — connect a real calendar via `/oauth/google/connect`, complete a real conversation through to a real booked event on `brayiron@kaivixlab.com`'s calendar, confirm and clean up — has not yet been performed.
+Every calendar/booking behavior is proven with mocked unit tests (Google API and LLM calls fully mocked, 384 passing); the OAuth setup itself was separately verified with a real browser consent flow (confirmed real calendars listed). A full, deliberate end-to-end run — connect a real calendar via `/oauth/google/connect`, complete a real conversation through to a real booked event on `brayiron@kaivixlab.com`'s calendar, confirm and clean up — has not yet been performed.
 
 ## Issue: `knowledge_provider` and `calendar_provider` still decorative
 **Status:** Open, deliberately deferred
@@ -268,7 +269,7 @@ No significant technical debt beyond the Known Issues above.
 
 # Active Branch
 
-`main`, at `057b635`, pushed to `origin`. No unmerged feature branches — `phase-5-business-auth-and-hardening` was fast-forward merged into `main` on 2026-07-31 and deleted.
+`main`, at `a19e76a`, pushed to `origin`. No unmerged feature branches — `phase-5-business-auth-and-hardening` (Decisions #024–#026) and the conversation-turn-redaction branch (Decision #027) were both fast-forward merged into `main` on 2026-07-31 and deleted; neither existed on `origin` before its merge.
 
 ---
 
@@ -366,7 +367,7 @@ Only after these requirements are satisfied should Version 1 be considered compl
 - Suite grew from 93 to **261 tests**, all passing.
 - Eval suite found to be blocked by Groq's token-per-day cap; the block was initially reported without numbers because `utils/llm.py` discards the 429 body by design. Real limits since measured — see Known Issues.
 
-**2026-07-30 to 2026-07-31 — Business authentication & hardening (Decisions #024–#026)**
+**2026-07-30 to 2026-07-31 — Business authentication & hardening (Decisions #024–#027)**
 
 - Per-business API keys on `POST /chat/{business_id}`, closing the authorization gap Decision #023 had recorded as an explicit trade-off. Enforced as a dependency ahead of config loading, and an unknown `business_id` returns the same 401 as a known one so the endpoint is not an enumeration oracle. Plain `POST /chat` left unauthenticated on purpose — it carries the live widget's traffic (Decision #024).
 - `providers.knowledge_provider` made authoritative and `knowledge.source_type` removed, resolving the duplicate-config ambiguity Decision #022 had deliberately left open rather than guessing at. Zero behaviour change for Kaivix, asserted on namespace, loaded document set and retrieval output (Decision #025).
@@ -374,6 +375,8 @@ Only after these requirements are satisfied should Version 1 be considered compl
 - Eval harness gained rate-limit pacing and `--runs N`, and `evals/README.md` gained a measured token-budget section. This corrected an earlier report that the eval was "blocked on Groq quota" with no numbers — the runner could not see them because `utils/llm.py` discards the 429 body by design.
 - Suite grew from 261 to **342 tests**, all passing.
 - Merged to `main` as a fast-forward on 2026-07-31 (`724c161..057b635`) and pushed to `origin`; the branch was deleted. It had never been pushed to `origin`, so until that merge all of #024–#026 existed only on one local machine.
+- Conversation turns withheld from logs by default, closing the trade-off #026 explicitly left open (Decision #027). Checking the actual log before starting corrected the premise #026 was written on: only one of the four `@`-bearing lines in `logs/app.log` came from `log_user`; the other three came from `ConversationEngine._log_turn` on the FastAPI serving path, which #026 never mentioned. `_log_turn`'s generated `conversation_summary` narrative concentrates exactly the fields #026 went to the trouble of masking, so masking alone (as done for `log_lead`) couldn't apply to it — a turn is prose, not fields, so free text is withheld wholesale rather than field-masked, while structured turn metadata (stage, intent, goal, completion) is kept in full.
+- Suite grew from 342 to **384 tests**, all passing. Merged to `main` as a fast-forward on 2026-07-31 (`057b635..a19e76a`) and pushed to `origin`; the branch was deleted, never having existed on `origin`.
 
 Every milestone above: proven with a dedicated test (not just "it runs"), confirmed zero blast radius outside its named files via `git diff --stat`, and committed/pushed as an individual rollback checkpoint before the next milestone began.
 
@@ -391,7 +394,7 @@ Every milestone above: proven with a dedicated test (not just "it runs"), confir
 
 These are genuinely unresolved from the commit history and Decision Log, and are recorded rather than guessed at.
 
-1. **Does the post-Milestone-5 work constitute Milestone 6?** `docs/Milestone_Log.md` has no entry after Milestone 5 and no reference to a Milestone 6 anywhere in `docs/`. The work from 2026-07-27 onward is substantial and carries Decisions #021–#026, and the log's own rule is that "each completed milestone should be added to this document immediately after completion" — but nothing states whether this was intended as one milestone, two (hardening, then business auth), or ongoing work not yet at a milestone boundary. No entry has been invented for it.
+1. **Does the post-Milestone-5 work constitute Milestone 6?** `docs/Milestone_Log.md` has no entry after Milestone 5 and no reference to a Milestone 6 anywhere in `docs/`. The work from 2026-07-27 onward is substantial and carries Decisions #021–#027, and the log's own rule is that "each completed milestone should be added to this document immediately after completion" — but nothing states whether this was intended as one milestone, two (hardening, then business auth), or ongoing work not yet at a milestone boundary. No entry has been invented for it.
 
 2. **What does "Phase 2" mean?** This document has used "Phase 2" for the second half of AI Employee V1 (production hardening, testing, deployment). `docs/Roadmap.md` uses "Phase 2" for Customer Validation, with all V1 work inside Phase 1. Both are internally consistent; they just disagree on the label. Worth picking one.
 

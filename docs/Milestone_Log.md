@@ -908,9 +908,9 @@ Real end-to-end calendar connection + live booking verification, then continue P
 
 ⚠️ Not a milestone entry. This section exists so this log does not imply Milestone 5 is the current state of the project.
 
-Substantial work landed between 2026-07-27 and 2026-07-31 carrying Decisions #021–#026, and no milestone entry was written for any of it. Whether it constitutes one milestone, two (hardening, then business auth), or work not yet at a milestone boundary has not been decided — so no entry has been invented here. See Open Questions in `docs/Current_Status.md`.
+Substantial work landed between 2026-07-27 and 2026-07-31 carrying Decisions #021–#027, and no milestone entry was written for any of it. Whether it constitutes one milestone, two (hardening, then business auth), or work not yet at a milestone boundary has not been decided — so no entry has been invented here. See Open Questions in `docs/Current_Status.md`.
 
-All of it is now on `main` at `057b635` and pushed to `origin`. Suite grew 93 → 261 → **342 tests**, all passing.
+All of it is now on `main` at `a19e76a` and pushed to `origin`. Suite grew 93 → 261 → 342 → **384 tests**, all passing.
 
 What landed, for the record:
 
@@ -922,13 +922,14 @@ What landed, for the record:
 - Decision #022 — `providers.yaml` drives real LLM and CRM selection; `BaseCRM` completed from one abstract method to five as a precondition.
 - Decision #023 — multi-business serving via per-business engines in `ChatService`; Decision #011 validated rather than superseded. Message length capped.
 
-**Business authentication and privacy** (Decisions #024–#026, suite 261 → 342):
+**Business authentication and privacy** (Decisions #024–#027, suite 261 → 384):
 - Decision #024 — per-business API keys on `POST /chat/{business_id}`, closing the authorization gap #023 recorded as an explicit trade-off. SHA-256 hash storage, `secrets.compare_digest` verification, enforced ahead of config loading, and no enumeration oracle on unknown `business_id`.
 - Decision #025 — `providers.knowledge_provider` made authoritative; `knowledge.source_type` removed. Resolves the ambiguity #022 deliberately left open.
 - Decision #026 — lead PII masked in `Logger.log_lead` (a latent exposure, no callers, not a breach).
 - Eval harness rate-limit pacing, `--runs N`, and measured token-budget documentation in `evals/README.md`.
+- Decision #027 — conversation turns withheld from logs by default, closing the trade-off #026 explicitly left open. Checking the live log before starting corrected #026's premise: three of four leaked lines came from `ConversationEngine._log_turn` on the FastAPI serving path, not from the CLI-only `log_user`/`log_ai` calls #026 had scoped to. The generated `conversation_summary` narrative concentrates exactly the identifying fields #026 masked elsewhere, and is prose rather than fields, so it's withheld wholesale rather than field-masked; structured turn metadata (stage, intent, goal, completion, missing field names) is kept in full. `KAIVIX_LOG_CONVERSATION_BODIES=1` re-enables bodies for debugging without disabling the address sweep or length bound.
 
-This work lived on `phase-5-business-auth-and-hardening` until 2026-07-31, when it was fast-forward merged into `main` (`724c161..057b635`) and the branch deleted. It had never been pushed to `origin`, so until that merge Decisions #024–#026 existed only on one local machine — worth noting as a lesson about where unpushed work is and is not backed up.
+This work lived on two branches, both merged to `main` on 2026-07-31 and both deleted afterward, neither having existed on `origin` before its own merge: `phase-5-business-auth-and-hardening` (Decisions #024–#026) was fast-forward merged first (`724c161..057b635`), then a second branch carrying Decision #027 was fast-forward merged on top (`057b635..a19e76a`). Until each merge landed, its decisions existed only on one local machine — worth noting as a lesson about where unpushed work is and is not backed up.
 
 Also open: the conversation-quality eval suite cannot complete a pass on Groq's free tier (~62,000 tokens per pass against a 100,000 token-per-day cap). Details in `docs/Current_Status.md`.
 
