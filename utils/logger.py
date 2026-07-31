@@ -1,14 +1,60 @@
 import hashlib
 import logging
+import os
+import re
 from pathlib import Path
 
 # How much free text is kept from unbounded visitor-written fields. Long
 # enough to be recognisable in a log line, short enough to bound it.
 _FREE_TEXT_LIMIT = 60
 
+# The same guard for text that is a whole turn or a generated narrative rather
+# than one field. 60 characters is the right bound for a `pain_point`; applied
+# to a paragraph it cuts mid-sentence and throws away the structured tail --
+# including, in the case of the turn summary, the missing-field list that is
+# the most useful thing in the line. Still bounded, just at paragraph scale.
+_TURN_TEXT_LIMIT = 400
+
 # Length of the lead reference. 12 hex characters is ample to correlate log
 # lines for one lead without collisions at any volume this will ever see.
 _REFERENCE_LENGTH = 12
+
+# Finds an address embedded anywhere in a sentence, which is how emails
+# actually reach the log -- not as a tidy `email` field but inside "my email
+# is nadia@example.com" or a generated summary's "Known so far: email:n@e.com".
+# Deliberately loose on the local part and anchored on a dotted domain: over-
+# matching costs a masked false positive, under-matching writes an address to
+# disk. Not an RFC 5322 validator and does not need to be.
+_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+
+# Opt-in for writing whole conversation turns to the log. See
+# `conversation_bodies_enabled` for why they are off by default.
+_CONVERSATION_BODY_ENV = "KAIVIX_LOG_CONVERSATION_BODIES"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def conversation_bodies_enabled() -> bool:
+    """
+    Whether whole conversation turns may be written to the log.
+
+    Off unless `KAIVIX_LOG_CONVERSATION_BODIES` is set to a truthy value.
+
+    A conversation turn is unbounded text a visitor typed, and routinely
+    carries a name, an address and a phone number in one sentence. Unlike a
+    lead's structured fields there is nothing to mask field-by-field: the
+    identifiers are the content.
+
+    Off by default is affordable because nothing depends on the log for the
+    live case -- `app.py` already prints the whole exchange to the terminal
+    for the human sitting in front of it. What the log adds is the *later*
+    read, which is exactly when a plaintext transcript on disk is a liability
+    rather than a convenience. Turning this on is a deliberate act for a
+    debugging session, not the resting state.
+
+    Read per call rather than cached at import so a test (or a developer
+    mid-session) can flip it without rebuilding the Logger.
+    """
+    return os.getenv(_CONVERSATION_BODY_ENV, "").strip().lower() in _TRUTHY
 
 
 def lead_reference(business_id, email) -> str:
@@ -70,20 +116,76 @@ def _initials(name) -> str:
     return "".join(f"{part[0].upper()}." for part in parts)
 
 
-def _truncate(value) -> str:
+def _truncate(value, limit: int = _FREE_TEXT_LIMIT) -> str:
     """
     Bound an unbounded visitor-written field.
 
     This is a length guard, not redaction: it does not make free text safe,
     it stops one pasted essay from dominating the log. Fields that are direct
     identifiers get masked instead.
+
+    `limit` defaults to one field's worth; callers handling a whole turn or a
+    generated paragraph pass `_TURN_TEXT_LIMIT` instead.
     """
     text = "" if value is None else str(value).strip()
 
-    if len(text) <= _FREE_TEXT_LIMIT:
+    if len(text) <= limit:
         return text
 
-    return f"{text[:_FREE_TEXT_LIMIT]}... (+{len(text) - _FREE_TEXT_LIMIT} chars)"
+    return f"{text[:limit]}... (+{len(text) - limit} chars)"
+
+
+def redact_free_text(value, limit: int = _TURN_TEXT_LIMIT) -> str:
+    """
+    Make a line of free text loggable: mask any address inside it, then bound
+    its length.
+
+    `_mask_email` masks a field known to *be* an address. This handles the
+    other case -- an address sitting inside a sentence -- by sweeping the text
+    for anything that looks like one and masking each hit through that same
+    function, so both paths produce `n***@example.com` and there is one
+    definition of what a masked address looks like.
+
+    Masking runs before truncation deliberately. Truncating first can cut an
+    address in half and leave the local part -- the identifying half -- sitting
+    in the log with the domain gone.
+
+    This bounds and de-identifies; it does not sanitise. A name, a phone
+    number, or an address written in words all survive it, which is why whole
+    conversation turns are additionally withheld by default rather than merely
+    swept (see `conversation_bodies_enabled`).
+    """
+    text = "" if value is None else str(value).strip()
+
+    if not text:
+        return ""
+
+    swept = _EMAIL_PATTERN.sub(lambda hit: _mask_email(hit.group(0)), text)
+
+    return _truncate(swept, limit)
+
+
+def describe_body(value) -> str:
+    """
+    What stands in for a conversation turn in the log.
+
+    Withheld by default, and the placeholder still reports the length so the
+    log remains useful for the questions it can honestly answer -- did a turn
+    happen, was it empty, was it enormous -- without carrying its content.
+
+    When bodies are switched on the text is still swept and bounded. The gate
+    and the sweep are not alternatives: the gate is the default posture, the
+    sweep is the floor that applies whatever the gate is set to.
+    """
+    text = "" if value is None else str(value).strip()
+
+    if not text:
+        return "<empty>"
+
+    if not conversation_bodies_enabled():
+        return f"<{len(text)} chars withheld; set {_CONVERSATION_BODY_ENV}=1 to log bodies>"
+
+    return redact_free_text(text)
 
 
 class Logger:
@@ -134,10 +236,32 @@ class Logger:
     # ---------- Conversation ----------
 
     def log_user(self, message: str):
-        self.logger.info(f"Visitor: {message}")
+        """
+        Record that the visitor said something, without writing what they said
+        to disk by default.
+
+        This used to log the turn verbatim. A visitor message is the densest
+        PII in the system -- one line of the existing log carries a name, an
+        address, a phone number and a budget, because that is simply how people
+        answer "what should I call you and where can I reach you?".
+
+        Same rule as `log_lead`: direct identifiers do not go to disk. The
+        difference is that a lead is a set of named fields that can be masked
+        one by one, and a turn is undifferentiated prose where the identifiers
+        *are* the content -- so the body is withheld rather than masked, and
+        masking applies on top when it is switched back on.
+        """
+        self.logger.info(f"Visitor: {describe_body(message)}")
 
     def log_ai(self, message: str):
-        self.logger.info(f"Alex: {message}")
+        """
+        Record that the assistant replied. Gated the same way as `log_user`.
+
+        The assistant's own text is not visitor-written, but it quotes back
+        what it was told ("Thanks Nadia, I'll send that to nadia@..."), so it
+        leaks the same identifiers one turn later.
+        """
+        self.logger.info(f"Alex: {describe_body(message)}")
 
     # ---------- Lead ----------
 

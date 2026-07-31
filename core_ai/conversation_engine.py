@@ -21,7 +21,7 @@ from core_ai.working_memory import WorkingMemory
 from scheduling.google_calendar_provider import GoogleCalendarProvider
 from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
-from utils.logger import Logger
+from utils.logger import Logger, conversation_bodies_enabled, redact_free_text
 
 
 class ConversationEngine:
@@ -635,7 +635,30 @@ class ConversationEngine:
         working_memory: WorkingMemory = None,
         long_term_memory: dict = None,
     ) -> None:
-        """Lightweight debugging output to help future tuning."""
+        """
+        Lightweight debugging output to help future tuning.
+
+        Unlike `Logger.log_user`/`log_ai`, this runs on the FastAPI serving
+        path -- every `/chat/{business_id}` request reaches it -- so it is the
+        turn-logging that actually matters for a deployed business.
+
+        The structured fields below are kept in full: a stage, an intent, a
+        goal, a completion percentage and a list of missing field *names*
+        describe the conversation without describing the person having it.
+        That is the same line Decision #026 drew for `log_lead`.
+
+        The two narrative fields are the problem. `working_memory.summary`
+        embeds the visitor's most recent objection verbatim, and
+        `conversation_summary` is a generated paragraph that opens with the
+        lead's name and then lists their known facts -- which is how addresses
+        reached `logs/app.log` from here. So the summary is swept, and the
+        narrative is withheld by default on the same switch as conversation
+        bodies, because a name in prose is not something a sweep can find.
+
+        Both the printed block and the log line are built from the same
+        redacted list. Stdout is not a safer destination than the log file --
+        under a container runtime it is collected the same way.
+        """
         progress = qualification["progress"]
 
         summary_lines = [
@@ -649,12 +672,20 @@ class ConversationEngine:
         ]
 
         if working_memory is not None:
-            summary_lines.append(f"Working memory: {working_memory.summary}")
+            summary_lines.append(
+                f"Working memory: {redact_free_text(working_memory.summary)}"
+            )
             if working_memory.conversation_summary:
-                summary_lines.append(
-                    f"Conversation summary (turn {working_memory.summary_last_updated_turn}): "
-                    f"{working_memory.conversation_summary}"
-                )
+                turn = working_memory.summary_last_updated_turn
+
+                if conversation_bodies_enabled():
+                    narrative = redact_free_text(working_memory.conversation_summary)
+                else:
+                    narrative = (
+                        f"<{len(working_memory.conversation_summary)} chars withheld>"
+                    )
+
+                summary_lines.append(f"Conversation summary (turn {turn}): {narrative}")
 
         if long_term_memory:
             previous_count = len(long_term_memory.get("previous_conversations") or [])

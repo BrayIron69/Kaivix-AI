@@ -1484,9 +1484,79 @@ Truncation of the free-text fields is a length guard, not redaction, and the cod
 
 **Trade-offs**
 - `pain_point` is visitor-written free text and is still logged. If a visitor types their phone number into it, that reaches the log. Bounding it is not sanitising it; treating every free-text field as unloggable is the stricter position and was not taken, because it would empty the line.
-- **`log_user` and `log_ai` in `app.py` still log whole conversation turns verbatim, which is the same class of exposure and a larger one** — a visitor message routinely contains a name and address. `logs/app.log` currently holds four such lines (test domains). Out of scope here and not fixed; `app.py` is the local CLI harness, not the FastAPI serving path, which is why it is lower priority rather than harmless.
-- No log rotation and no retention limit, so `app.log` still grows without bound and old entries are never aged out.
+- **`log_user` and `log_ai` in `app.py` still log whole conversation turns verbatim, which is the same class of exposure and a larger one** — a visitor message routinely contains a name and address. `logs/app.log` currently holds four such lines (test domains). Out of scope here and not fixed; `app.py` is the local CLI harness, not the FastAPI serving path, which is why it is lower priority rather than harmless. **Resolved by Decision #027, which also found that the reasoning above was wrong on the facts: only one of those four lines came from `app.py`. The other three came from `ConversationEngine._log_turn`, which *is* on the serving path.**
+- No log rotation and no retention limit, so `app.log` still grows without bound and old entries are never aged out. Still open after #027; see that entry's trade-offs.
 - The reference is unsalted, so a guessed address can be confirmed against the log.
+
+---
+
+# Decision #027
+
+## Conversation Turns Are Withheld From Logs By Default
+
+**Date**
+
+2026-07-30
+
+**Status**
+
+Accepted
+
+### Context
+
+Decision #026 masked direct identifiers in `Logger.log_lead` and recorded, as an explicit out-of-scope trade-off, that `log_user` and `log_ai` still wrote whole conversation turns verbatim. This entry closes that trade-off.
+
+Checking the four `@`-bearing lines in `logs/app.log` before starting corrected the premise #026 was written on. Only **one** came from `log_user`. The other **three** came from `ConversationEngine._log_turn`, which #026 did not mention at all — and which runs on the FastAPI serving path (`/chat/{business_id}` → `ChatService.get_engine(...).process_message(...)` → `_log_turn`), not the CLI harness.
+
+So #026's stated reason for deprioritising this ("`app.py` is the local CLI harness, not the FastAPI serving path") did not actually apply to the majority of the exposure. The serving path was the larger leak the whole time.
+
+`_log_turn` leaks through `working_memory.conversation_summary`, the narrative built by `ConversationSummary.build`. That narrative opens with `lead.name` and then renders `lead.known_facts`, which `EntityExtractor` populates as `email:<address>`, `company:<name>`, `budget:<amount>`. It is a generated paragraph that concentrates exactly the fields #026 went to the trouble of masking.
+
+### Decision
+
+Free text about a visitor is **withheld from the log by default, and swept and bounded whenever it is written**.
+
+| Path | Treatment |
+|---|---|
+| `log_user` / `log_ai` | Body withheld; logs role, length, and how to re-enable |
+| `_log_turn` structured fields (stage, intent, goal, qualified, completion, missing field *names*) | Kept in full |
+| `_log_turn` `working_memory.summary` | Swept for addresses and bounded — it embeds the visitor's latest objection |
+| `_log_turn` `conversation_summary` narrative | Withheld by default; swept and bounded when enabled |
+
+`KAIVIX_LOG_CONVERSATION_BODIES=1` re-enables bodies for a debugging session. The gate and the sweep are not alternatives: with bodies enabled, addresses are still masked and length is still bounded.
+
+New helpers in `utils/logger.py`: `redact_free_text` (regex address sweep, each hit masked through the existing `_mask_email`) and `describe_body` (the withheld placeholder). `_truncate` gained an optional `limit`.
+
+### Reasoning
+
+#026's rule — direct identifiers masked, non-identifying data kept — is the right rule and is preserved here for the structured fields. It does not extend to a conversation turn, because a turn has no fields: it is prose in which the identifiers *are* the content. A real line from the existing log reads `hasnat is name email is <address> number is 23149389819 budget is 5000$`. A field-by-field mask has nothing to grip.
+
+A regex can find an address. It cannot find `hasnat is name`, and it cannot find `Sarah from dental clinic downtown` at the head of the generated narrative. So sweeping alone would have produced a log that *looked* redacted while still carrying names and phone numbers — worse than the honest status quo, because it invites trust it has not earned.
+
+Withholding by default is affordable because nothing depends on the log for the live case: `app.py` already prints the exchange to the terminal for the human in front of it, and `_log_turn` prints its block too. What the log uniquely provides is the *later* read, which is precisely when a plaintext transcript on disk is a liability rather than a convenience. The placeholder still reports length, so "did a turn happen, was it empty, was it enormous" survives.
+
+Masking runs before truncation. The reverse order can cut an address at the boundary and leave the local part — the identifying half — in the log with the domain stripped, which is the worst of both.
+
+`_truncate`'s 60-character limit was kept for lead fields and a separate 400-character limit introduced for turn-scale text. This surfaced from a failing test rather than from design: at 60 characters the turn summary lost its missing-field list, the single most useful thing in that line, and the truncation landed *before* the address, so nothing was masked and the safety was accidental. A bound sized for one `pain_point` is not a bound sized for a paragraph.
+
+Both the printed block and the logged line in `_log_turn` are built from the same redacted list. Under a container runtime stdout is collected the same way a log file is, so treating `print` as the safe destination would only have moved the leak.
+
+### Consequences
+
+**Benefits**
+- No conversation body, generated narrative, or embedded address is written to disk by default
+- The serving-path leak — three of the four real leaked lines — is closed, not just the harness one
+- The turn log keeps everything that made it useful for tuning: stage, intent, goal, completion, missing fields, conversation id
+- Full bodies remain one environment variable away for an actual debugging session
+- Tests assert against the line the logger really emitted, and drive the narrative through the real `ConversationSummary` engine, so a change there fails the test rather than silently widening the leak
+
+**Trade-offs**
+- With `KAIVIX_LOG_CONVERSATION_BODIES=1` a name or phone number in a turn still reaches the log; the sweep only masks addresses. Enabling it is a deliberate act and the docstring says what it costs.
+- The sweep is regex-based and will mask something that merely looks like an address. Preferred over the reverse: a false positive costs a masked token, a false negative writes an address to disk.
+- The generated narrative is withheld wholesale rather than name-masked. `ConversationSummary` could be changed to build a de-identified variant, which would be better and is not done here.
+- The 400-character turn bound is a judgement, not a measurement.
+- Existing lines already in `logs/app.log` are untouched. This stops new writes; it does not clean up old ones.
+- **Still no log rotation and no retention limit** (carried forward from #026, deliberately not folded in). Rotation bounds file size, retention ages entries out, and they are separate mechanisms from redaction — mixing them would have muddied both entries. Redaction narrows what an old line can expose, which lowers the urgency without removing it.
 
 ---
 
