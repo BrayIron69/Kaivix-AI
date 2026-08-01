@@ -935,6 +935,91 @@ Also open: the conversation-quality eval suite cannot complete a pass on Groq's 
 
 ---
 
+# Milestone 6
+
+## Live Outage Fix, Real Provider Interfaces, Security Review, and Phase 5 Authentication
+
+**Status**
+Completed
+
+**Completion Date**
+2026-07-31
+
+---
+
+### Objective
+
+Fix a confirmed live production outage, turn provider abstraction from decorative scaffolding into something real, run an actual security review rather than a checklist exercise, close the authentication gap flagged when minimal multi-business serving first shipped, and protect real customer data across both structured and unstructured logging paths.
+
+---
+
+### Work Completed
+
+- **Live outage fix (Decision, commit 912bb65)**: `/chat` was returning unhandled 500s whenever the Groq API failed, with `/health` staying green throughout — no alerting existed for the one failure mode that mattered. Added a provider-agnostic `LLMUnavailableError`, a graceful 503 fallback with a real user-facing message, and verified against the actual Groq API with a deliberately invalid key, confirming no secret ever reaches the log.
+- **`tzdata` dependency (ed43488)**: found to be a latent production risk, not just a test-environment gap — `scheduling/google_calendar_provider.py` calls `ZoneInfo()` on every availability lookup, and Windows/some containers ship no IANA database at all without it.
+- **Provider interfaces made real (977d403, Decision #022)**: `providers.yaml` was validated but never read. LLM and CRM provider selection now genuinely work, proven by a test that registers a distinct stub provider and confirms selection — not just field-reading. Found and fixed a real latent bug in the process: `BaseCRM` declared only one method while `LeadService` called five; a second provider could have satisfied the interface and crashed on first use.
+- **Minimal Phase 5 (5853a54, Decision #023)**: one process serving multiple businesses, proven with zero changes to any engine-level file — direct validation that Decision #011's original design (bind `business_id` once at construction) held up under real multi-tenant use. Message-length cap (2000 chars) added in the same pass.
+- **Security review (057b635, Decisions #024-025)**: AST-based SQL injection audit (27 `execute()` sites checked, 3 f-string cases individually verified safe), secrets-in-logs audit (clean), `pip-audit` run, HTTPS/HSTS posture reviewed and documented as a deliberate deferral, not an oversight.
+- **`business_id` authentication (057b635, Decision #024)**: closed the exact gap flagged when minimal Phase 5 first shipped — `POST /chat/{business_id}` now requires a per-business API key (SHA-256 hashed, `secrets.compare_digest` verification), and unauthenticated requests are uniformly rejected (401) whether the business exists or not, closing the enumeration gap directly. Plain `POST /chat` proven byte-identical and unaffected.
+- **Knowledge provider conflict resolved (057b635, Decision #025)**: `knowledge.source_type` and `providers.knowledge_provider` had silently competed for the same decision since the original provider work. `providers.knowledge_provider` now wins; the other field is an inert no-op. Zero behavior change confirmed for Kaivix.
+- **PII redaction, round one (057b635, Decision #026)**: `Logger.log_lead` masked (email/name), though found to have no active callers — a closed gun, not an active breach.
+- **PII redaction, round two (a19e76a, Decision #027)**: a materially more serious, *active* leak found on the live serving path — `_log_turn` was logging an LLM-generated conversation summary that embedded the visitor's email and name verbatim, at INFO level, on every real turn. Fixed with body-withholding by default (opt-in via `KAIVIX_LOG_CONVERSATION_BODIES`) and free-text email/name redaction swept across both the structured and narrative paths. A failing test caught a real flaw in the first implementation — the original 60-char truncate cut summaries before the redaction could ever fire, making the original "fix" accidental rather than real.
+- **Eval suite root cause finally diagnosed**: Decision #021's own security fix (suppressing `str(error)` so a Groq `AuthenticationError` can't leak part of a key) had the side effect of hiding whether a 429 was a recoverable per-minute limit or a hard daily cap. The suite now paces requests and fails fast on a confirmed daily block rather than retrying into a dead end. `no_price_leak` and `no_bot_admission` confirmed passing on real runs; `booking_confirmation_phrasing` still has zero real coverage — the one thing this milestone did not close.
+
+---
+
+### Files Modified
+
+`utils/llm.py`, `utils/llm_provider.py` (new), `utils/exceptions.py` (new), `utils/logger.py`, `crm/base_crm.py`, `crm/registry.py` (new), `services/chat_service.py`, `services/lead_service.py`, `core_ai/conversation_engine.py`, `api/routers/chat.py`, `api/handlers/exceptions.py`, `auth/api_key_store.py` (new), `scripts/issue_api_key.py` (new), `config/businesses/kaivix/knowledge.yaml`, `config/businesses/kaivix/providers.yaml`, `requirements.txt`, `evals/run_conversation_evals.py`, `evals/README.md`, plus new test files: `tests/test_provider_selection.py`, `tests/test_multi_business_serving.py`, `tests/test_conversation_turn_redaction.py`, and extensions to existing suites.
+
+---
+
+### Architecture Impact
+
+`core_ai/planning_engine.py` and every other pure-decision engine file remained untouched throughout — every change this milestone made was additive at the orchestration layer (`ConversationEngine`, `ChatService`, the API routers) or in new, isolated modules. This is the second consecutive milestone that validates the original Phase 1 boundary between "decide" (engine files, I/O-free) and "act" (orchestration, I/O-heavy) without needing to bend it.
+
+---
+
+### Decisions Made
+
+Decision #021 — graceful 503 fallback for LLM failures (the live outage fix).
+Decision #022 — LLM and CRM provider selection made real; Knowledge deliberately left unabstracted pending #025.
+Decision #023 — minimal multi-business serving; `business_id` authentication flagged as a prerequisite before third-party use.
+Decision #024 — `business_id` authentication shipped, closing #023's flagged gap; unauthenticated requests uniformly 401 regardless of whether the business exists.
+Decision #025 — `providers.knowledge_provider` resolved as authoritative over `knowledge.source_type`.
+Decision #026 — `Logger.log_lead` PII masking.
+Decision #027 — conversation turns withheld from logs by default; the more serious, active serving-path leak.
+
+---
+
+### Testing
+
+Suite grew from 261 (pre-milestone baseline) to 384, entirely additive, run and verified at every commit boundary — including several points today where test counts were independently re-verified by direct execution rather than trusted from a commit message, after real discrepancies surfaced between reported and actual state.
+
+---
+
+### Lessons Learned
+
+**Technical**: the most valuable single finding this milestone was procedural, not architectural — Decision #021's error-suppression fix (correct and necessary for its stated purpose) had an unintended side effect that made a real production problem (the Groq daily cap) indistinguishable from a transient blip for days. A security fix and an observability need were in tension, and the fix shipped without that tension being noticed. Worth remembering generally: hardening one property of a system can silently degrade another.
+
+**Process**: this milestone also produced a serious, repeated coordination failure — multiple concurrent Claude Code sessions operating on this same backend repo without mutual awareness, at times producing near-misses (two branches diverging with neither containing the other's fix; a merge task given false premises by a stale worktree). No data was lost, and every near-miss was caught by a session verifying real git state before acting rather than trusting a prior report — but the recovery cost real time and required unusual vigilance. Standing rule going forward: one active backend session at a time, and every session checks `git status`/`git log` against reality before trusting any inherited instruction or premise, including instructions from a peer session.
+
+---
+
+### Remaining Work
+
+- `booking_confirmation_phrasing` eval check: zero real coverage, needs one clean run once Groq quota allows.
+- Groq billing: root cause of the outage and the reason full eval coverage remains blocked; being addressed independently on a business timeline, not an engineering one.
+- Deliberately deferred, logged not forgotten: HSTS/app-level HTTPS enforcement, unbounded engine cache (no eviction policy), no key rotation or self-service issuance for the new per-business API keys.
+
+---
+
+### Next Milestone
+
+Phase 4 — first real client onboarding. At this point the roadmap's remaining work is substantially a Growth & Operations question, not an engineering one.
+
+---
+
 
 
 \# Future Milestones
