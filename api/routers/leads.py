@@ -1,14 +1,21 @@
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.routers.admin import require_admin
 from crm.lead import Lead
 from schemas.lead import LeadCreate, LeadUpdate, LeadResponse
 from services.lead_service import LeadService
 
+# Same HTTP Basic Auth dependency as the /admin dashboard (api/routers/
+# admin.py) -- this router exposes the identical lead data (read AND
+# write) with no separate credential scheme of its own. Unauthenticated
+# until this fix: anyone who found the URL could read every captured
+# lead's name/email/business details, or create/update/delete records.
 router = APIRouter(
     prefix="/leads",
     tags=["Leads"],
+    dependencies=[Depends(require_admin)],
 )
 
 lead_service = LeadService()

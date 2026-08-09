@@ -1560,6 +1560,53 @@ Both the printed block and the logged line in `_log_turn` are built from the sam
 
 ---
 
+# Decision #028
+
+## `/leads` HTTP Router Authenticated With The Existing Admin Credential Scheme
+
+**Date**
+
+2026-08-10
+
+**Status**
+
+Accepted
+
+### Context
+
+Flagged, not fixed, during the booking-hallucination investigation the day before: `api/routers/leads.py` had **zero authentication on any route** — `GET /leads` (list), `GET /leads/{email}`, `POST /leads`, `PUT /leads/{email}`, `DELETE /leads/{email}`. This was live on the deployed instance. Anyone who found the URL could read every captured lead's name, email, and business details, or create, modify, and delete records outright — a strictly worse exposure than the read-only admin dashboard `api/routers/admin.py` already required HTTP Basic Auth for, protecting the exact same underlying lead data.
+
+### Decision
+
+`leads.py` now reuses `admin.py`'s `require_admin` dependency exactly — the same `HTTPBasic` credential check, the same `secrets.compare_digest` comparison on username and password separately, the same `ADMIN_USERNAME`/`ADMIN_PASSWORD` environment variables, the same fail-closed 503 when either is unset. Applied router-wide via `dependencies=[Depends(require_admin)]`, identical to how `admin.py` applies it. No new or parallel credential scheme was introduced.
+
+Two things the multi-business work made newly relevant were checked, not changed:
+- **Scoping**: `leads.py` and `admin.py` both call `LeadService` with no `business_id` argument, so both resolve to `LeadService`'s default (`DEFAULT_BUSINESS_ID`, `"kaivix"`) identically — one single-tenant scope, not two differently-scoped paths to the same data. Confirmed with a test that a lead saved under a different `business_id` is invisible through `/leads`, the same way it already is through `/admin`.
+- **Input validation**: `POST /leads`'s `LeadCreate.email` is already a pydantic `EmailStr`, so malformed addresses are already rejected (422) before the route body runs. A manually-callable creation endpoint has more abuse surface than the internal-only `ConversationEngine` → `LeadService.save()` capture path, so this was worth confirming with a test rather than assuming pydantic's default carried over — it does.
+
+Confirmed no internal caller goes through this HTTP router at all: `ConversationEngine._sync_lead_to_crm` calls `self.lead_service.save(lead, business_id=self.business_id)` directly, a Python method call on `LeadService`, never an HTTP request to `/leads`. A repo-wide grep for any internal caller of the `/leads` path found none. This change is safe with zero other code affected.
+
+### Reasoning
+
+Reusing the exact same dependency, rather than a second HTTPBasic instance with its own comparison logic, means there is exactly one place credential-checking logic lives and exactly one environment-variable pair to rotate. Two independent implementations of "the same idea" is how one of them quietly drifts — gets hardened, or rotated, or fixed, without the other following. `admin.py`'s `require_admin` was already correct (fails closed, timing-safe compare on both halves independently) and there was no reason to write it twice.
+
+Leaving the single-tenant scoping as-is (rather than adding a `business_id` path parameter to match `POST /chat/{business_id}`'s per-business model) was a deliberate non-change: this fix closes an authentication gap, not a scoping gap, and `admin.py` — the router this one is being brought in line with — has the identical limitation. Extending both to real multi-business support is a separate, larger piece of work belonging with Decision #023's multi-tenant serving, not bundled into an urgent auth fix.
+
+### Consequences
+
+**Benefits**
+- Closes a live, unauthenticated exposure of every captured lead's PII, and of write access (create/update/delete), not just reads
+- Zero new credential scheme to maintain — one dependency, one environment-variable pair, shared with `/admin`
+- Confirmed zero internal callers affected: `ConversationEngine`'s lead-sync path never touched this router
+- 25 new tests covering 401 (no creds, wrong creds), 503 (unconfigured, partially configured), 200/201 (valid creds, full CRUD), business-id scoping equivalence with `/admin`, and that no write side effect occurs before the 401 is enforced
+
+**Trade-offs**
+- Still single-tenant: this router (like `/admin`) has no `business_id` path parameter, so it only ever reaches Kaivix's own leads regardless of what other businesses' data may exist in the CRM. Pre-existing limitation, not introduced or worsened here.
+- HTTP Basic Auth sends credentials on every request (base64-encoded, not encrypted by the scheme itself); security depends entirely on the platform's TLS termination. Same model `admin.py` already accepted; not revisited here.
+- No rate limiting or lockout on repeated failed credential attempts. Unaddressed by this fix, same as `admin.py`.
+
+---
+
 \---
 
 
