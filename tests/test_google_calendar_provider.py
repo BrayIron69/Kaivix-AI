@@ -265,6 +265,63 @@ class TestGoogleCalendarProviderIsConnected(unittest.TestCase):
         provider = _make_provider(token_store=token_store)
         self.assertFalse(provider.is_connected("business-a"))
 
+    def test_is_connected_false_when_expired_and_no_refresh_token(self):
+        """
+        A row with no refresh_token whose access token has already
+        expired can never recover on its own (_load_credentials only
+        refreshes when credentials.refresh_token is truthy) -- this is
+        the fix for is_connected() previously passing on a genuinely
+        dead connection, which only failed later, silently, inside
+        get_free_busy_windows.
+        """
+        expired = (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat()
+        token_store = MagicMock()
+        token_store.load_token.return_value = {
+            "business_id": "business-a",
+            "token": "t",
+            "refresh_token": None,
+            "expiry": expired,
+        }
+
+        provider = _make_provider(token_store=token_store)
+        self.assertFalse(provider.is_connected("business-a"))
+
+    def test_is_connected_true_when_expired_but_refresh_token_present(self):
+        """
+        An expired access token with a live refresh_token is the normal
+        state between conversations -- access tokens are short-lived by
+        design, and _load_credentials refreshes them transparently on
+        next use. Must NOT report as disconnected, or the calendar would
+        falsely appear dead every time nobody has chatted in the last
+        hour.
+        """
+        expired = (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat()
+        token_store = MagicMock()
+        token_store.load_token.return_value = {
+            "business_id": "business-a",
+            "token": "t",
+            "refresh_token": "refresh-token",
+            "expiry": expired,
+        }
+
+        provider = _make_provider(token_store=token_store)
+        self.assertTrue(provider.is_connected("business-a"))
+
+    def test_is_connected_true_when_not_yet_expired_and_no_refresh_token(self):
+        not_yet_expired = (
+            datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+        ).isoformat()
+        token_store = MagicMock()
+        token_store.load_token.return_value = {
+            "business_id": "business-a",
+            "token": "t",
+            "refresh_token": None,
+            "expiry": not_yet_expired,
+        }
+
+        provider = _make_provider(token_store=token_store)
+        self.assertTrue(provider.is_connected("business-a"))
+
 
 class TestGoogleCalendarProviderSubtractBusy(unittest.TestCase):
     """
@@ -584,6 +641,43 @@ class TestGoogleCalendarProviderFreeBusyWindows(unittest.TestCase):
         for start, end in windows:
             self.assertEqual(end - start, timedelta(minutes=30))
             self.assertLess(end - start, timedelta(hours=8))
+
+    @patch("googleapiclient.discovery.build")
+    @patch("google.oauth2.credentials.Credentials")
+    def test_exception_during_lookup_is_logged_not_silently_swallowed(
+        self, mock_credentials_cls, mock_build
+    ):
+        """
+        The bare `except Exception: return []` used to swallow the real
+        error entirely -- a broken/expired token failing here looked
+        identical in the logs to "genuinely no availability," which is
+        exactly why the false-booking-confirmation gap went undetected.
+        The real exception must now reach the logger before the
+        empty-list fallback returns.
+        """
+        token_store = MagicMock()
+        token_store.load_token.return_value = dict(self._STORED_TOKEN)
+
+        mock_credentials = MagicMock()
+        mock_credentials.expired = False
+        mock_credentials_cls.return_value = mock_credentials
+
+        mock_build.side_effect = RuntimeError(
+            "invalid_grant: token has been expired or revoked"
+        )
+
+        provider = _make_provider(token_store=token_store)
+        mock_logger = MagicMock()
+        provider.logger = mock_logger
+
+        windows = provider.get_free_busy_windows("business-a")
+
+        self.assertEqual(windows, [])
+        mock_logger.error.assert_called_once()
+        logged_message = mock_logger.error.call_args[0][0]
+        self.assertIn("RuntimeError", logged_message)
+        self.assertIn("invalid_grant: token has been expired or revoked", logged_message)
+        self.assertIn("business-a", logged_message)
 
 
 class TestGoogleCalendarProviderCreateEvent(unittest.TestCase):

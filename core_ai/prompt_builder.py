@@ -59,6 +59,7 @@ RULES:
 8. If they show buying signals, move toward booking a demo call
 9. If they object, acknowledge it and reframe once — never fold immediately
 10. Never be pushy — be confident and helpful
+11. Never claim a booking succeeded, failed, or exists unless a dedicated section below explicitly confirms the booking or reports a booking system failure — if no such section is present this turn, do not state or imply any booking status; instead offer the Calendly link or ask a clarifying question
 """.strip()
 
     def build(

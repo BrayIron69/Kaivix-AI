@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from scheduling.base_calendar_provider import BaseCalendarProvider
 from scheduling.calendar_token_store import CalendarTokenStore
+from utils.logger import Logger
 
 # Fixed business-hours window used by get_free_busy_slots for every
 # business today (9-5, Monday-Friday, in the business's own timezone --
@@ -81,6 +82,7 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         self,
         token_store: CalendarTokenStore | None = None,
         business_config_repository: Optional[BusinessConfigRepository] = None,
+        logger: Optional[Logger] = None,
     ):
         self.client_id = os.getenv("GOOGLE_CLIENT_ID")
         self.client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -90,6 +92,7 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         # optional-dependency pattern as ConversationEngine's own
         # business_config_repository.
         self.business_config_repository = business_config_repository or BusinessConfigRepository()
+        self.logger = logger or Logger()
 
     # ------------------------------------------------------------------
     # Internal
@@ -219,7 +222,40 @@ class GoogleCalendarProvider(BaseCalendarProvider):
     # ------------------------------------------------------------------
 
     def is_connected(self, business_id: str = DEFAULT_BUSINESS_ID) -> bool:
-        return self.token_store.load_token(business_id) is not None
+        """
+        Whether a usable calendar connection exists for this business.
+
+        A stored row alone used to be treated as "connected" -- but a
+        row with no refresh_token whose access token has already expired
+        can never recover on its own (_load_credentials only refreshes
+        when credentials.refresh_token is truthy), so callers like
+        _maybe_attach_availability would pass this check and only
+        discover the connection is actually dead later, inside
+        get_free_busy_windows' exception handling.
+
+        A refresh_token being present is deliberately NOT treated as a
+        disqualifier even when the stored expiry has passed -- that is
+        the normal, expected state between conversations (access tokens
+        are short-lived by design) and _load_credentials already
+        refreshes them transparently on next use. Reuses
+        _deserialize_expiry, the same expiry-parsing logic
+        _needs_refresh uses for the proactive-refresh fix.
+        """
+        stored = self.token_store.load_token(business_id)
+        if stored is None:
+            return False
+
+        if stored.get("refresh_token"):
+            return True
+
+        expiry = self._deserialize_expiry(stored.get("expiry"))
+        if expiry is None:
+            # Unknown expiry and no refresh_token to fall back on --
+            # nothing here to disqualify the connection on.
+            return True
+
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        return now_utc_naive < expiry
 
     def get_authorization_url(self, business_id: str = DEFAULT_BUSINESS_ID) -> str:
         flow = self._build_flow(business_id)
@@ -374,7 +410,18 @@ class GoogleCalendarProvider(BaseCalendarProvider):
 
             return open_slots[:_MAX_RETURNED_SLOTS]
 
-        except Exception:
+        except Exception as error:
+            # Previously swallowed silently -- a broken/expired token
+            # failing here was indistinguishable in the logs from
+            # "genuinely no availability," which is exactly how the
+            # false-booking-confirmation gap went undetected: the
+            # calendar lookup died quietly and the pipeline carried on
+            # with an empty slot list as if nothing were wrong.
+            self.logger.error(
+                f"[GoogleCalendarProvider] get_free_busy_windows failed "
+                f"(business_id={business_id!r}): "
+                f"{type(error).__name__}: {error}"
+            )
             return []
 
     def create_event(

@@ -114,5 +114,47 @@ class TestPromptBuilderBookingSections(unittest.TestCase):
         self.assertNotIn("BOOKING SYSTEM ERROR", output)
 
 
+class TestEngineRulesBookingHallucinationGuard(unittest.TestCase):
+    """
+    Guards the fix for the false-booking-confirmation gap: rule #8 alone
+    pushes the model toward booking language with nothing constraining
+    what it's allowed to claim about booking status. This proves the new
+    rule is present in ENGINE_RULES (so it reaches the prompt on every
+    build, regardless of which booking fields are set this turn) and
+    that its presence doesn't disturb the existing byte-identical
+    unset-fields behavior proven above.
+    """
+
+    def test_engine_rules_contains_the_booking_status_guard_rule(self):
+        rules = PromptBuilder.ENGINE_RULES.format(max_sentences=4)
+
+        self.assertIn("Never claim a booking succeeded, failed, or exists", rules)
+        self.assertIn("Calendly", rules)
+        # Deliberately does not repeat the exact "BOOKING CONFIRMED" /
+        # "BOOKING SYSTEM ERROR" section headers here -- ENGINE_RULES is
+        # always present in the prompt, so literal header text in the
+        # rule would defeat the other tests' assertNotIn checks for
+        # those headers when no booking outcome applies this turn.
+        self.assertNotIn("BOOKING CONFIRMED", rules)
+        self.assertNotIn("BOOKING SYSTEM ERROR", rules)
+
+    def test_guard_rule_is_present_even_when_no_booking_fields_are_set(self):
+        plan = SimpleNamespace(
+            strategy="drive_to_booking",
+            next_question="Ask if they'd like to book a free demo call and offer a time.",
+            avoid_topics=[],
+        )
+
+        output = PromptBuilder().build(
+            stage="closing",
+            intent="buying_signal",
+            goal="book_demo",
+            knowledge="",
+            plan=plan,
+        )
+
+        self.assertIn("Never claim a booking succeeded, failed, or exists", output)
+
+
 if __name__ == "__main__":
     unittest.main()
