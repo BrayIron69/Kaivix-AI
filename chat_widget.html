@@ -62,6 +62,9 @@ body{font-family:'Arial',sans-serif;background:#050505;color:#fff;min-height:100
 .kvx-msg{max-width:82%;padding:10px 13px;border-radius:12px;font-size:13px;line-height:1.6;word-break:break-word;}
 .kvx-msg.agent{background:#1a1a1a;border:1px solid #222;color:#e0e0e0;align-self:flex-start;border-bottom-left-radius:3px;}
 .kvx-msg.user{background:#fff;color:#000;align-self:flex-end;border-bottom-right-radius:3px;}
+.kvx-msg a{text-decoration:underline;word-break:break-all;}
+.kvx-msg.agent a{color:#60a5fa;}
+.kvx-msg.user a{color:#2563eb;}
 .kvx-typing{display:flex;gap:4px;padding:10px 13px;background:#1a1a1a;border:1px solid #222;border-radius:12px;border-bottom-left-radius:3px;align-self:flex-start;}
 .kvx-typing span{width:6px;height:6px;background:#555;border-radius:50%;animation:bounce .9s infinite;}
 .kvx-typing span:nth-child(2){animation-delay:.15s;}
@@ -221,10 +224,67 @@ async function sendMessage(text, isOpening) {
 }
 
 // ── UI Helpers ────────────────────────────────────────────────
+
+// Escapes text for safe insertion into innerHTML. Every character with
+// HTML significance is entity-encoded, so nothing in `str` -- however it
+// got here -- can be interpreted as a tag or attribute.
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Only http(s) URLs are ever made clickable -- a javascript: or data:
+// URL simply won't match this pattern and stays as inert escaped text.
+const URL_PATTERN = /https?:\/\/[^\s<>"']+/g;
+
+// Sentence punctuation immediately after a URL (a period ending the
+// sentence, a closing paren around it, etc.) is trimmed off the link
+// and left as ordinary trailing text, e.g. "...book here: <url>." keeps
+// the period outside the <a> tag.
+const TRAILING_PUNCTUATION = /[.,!?:;)\]]+$/;
+
+// Converts plain message text into safe HTML: every character is
+// HTML-escaped except for detected URLs, which are wrapped in a real
+// <a> tag (also escaped, so a URL can never break out of its own href
+// attribute or inject markup). This must never fall back to inserting
+// the raw message as HTML -- that would reopen the exact XSS risk
+// escaping exists to prevent.
+function linkify(text) {
+  let result = '';
+  let lastIndex = 0;
+  let match;
+
+  URL_PATTERN.lastIndex = 0;
+  while ((match = URL_PATTERN.exec(text)) !== null) {
+    let url = match[0];
+    let end = match.index + url.length;
+
+    const trailing = url.match(TRAILING_PUNCTUATION);
+    if (trailing) {
+      url = url.slice(0, url.length - trailing[0].length);
+      end -= trailing[0].length;
+    }
+
+    if (!url) continue;
+
+    result += escapeHtml(text.slice(lastIndex, match.index));
+    const safeUrl = escapeHtml(url);
+    result += `<a href="${safeUrl}" target="_blank" rel="noopener">${safeUrl}</a>`;
+    lastIndex = end;
+  }
+
+  result += escapeHtml(text.slice(lastIndex));
+  return result;
+}
+
 function addMessage(text, role) {
   const el = document.createElement('div');
   el.className = `kvx-msg ${role}`;
-  el.textContent = text;
+  el.innerHTML = linkify(text);
   messages.appendChild(el);
   messages.scrollTop = messages.scrollHeight;
 }
