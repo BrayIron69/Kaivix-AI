@@ -124,6 +124,29 @@ class TestMaybeAttachAvailability(_IsolatedDatabasesMixin, unittest.TestCase):
         self.engine.calendar_provider.get_free_busy_windows.assert_not_called()
         self.assertEqual(self.working_memory.offered_slots, [])
 
+    def test_not_connected_logs_a_warning(self):
+        """
+        The unlogged root cause of the false-booking-confirmation gap:
+        is_connected() returning False used to leave zero trace anywhere.
+        Must log at WARNING, not INFO -- by this point
+        _calendar_booking_enabled() has already confirmed this business
+        wants the feature on, so a missing connection here means a real
+        visitor mid-booking-flow is getting no real slots, not merely
+        "no calendar configured yet."
+        """
+        self.engine.calendar_provider.is_connected.return_value = False
+        self.engine.logger = MagicMock()
+
+        plan = ConversationPlan(strategy="drive_to_booking")
+        result = self.engine._maybe_attach_availability("conv-1", plan, self.working_memory)
+
+        self.assertIs(result, plan)
+        self.engine.logger.warning.assert_called_once()
+        logged_message = self.engine.logger.warning.call_args[0][0]
+        self.assertIn(self.engine.business_id, logged_message)
+        self.assertIn("conv-1", logged_message)
+        self.engine.logger.error.assert_not_called()
+
     def test_calendar_exception_is_caught_and_logged_not_raised(self):
         self.engine.calendar_provider.is_connected.return_value = True
         self.engine.calendar_provider.get_free_busy_windows.side_effect = RuntimeError(

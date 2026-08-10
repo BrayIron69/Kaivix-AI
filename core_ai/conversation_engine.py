@@ -457,6 +457,22 @@ class ConversationEngine:
                 return plan
 
             if not self.calendar_provider.is_connected(self.business_id):
+                # WARNING, not INFO: by this point _calendar_booking_enabled()
+                # has already confirmed this business explicitly turned
+                # calendar_booking on, and PlanningEngine has decided this
+                # conversation should drive toward booking -- so a missing
+                # connection here isn't "hasn't set up a calendar yet," it's
+                # a real visitor mid-booking-flow getting no real slots,
+                # invisibly, for a feature that's supposed to be live. This
+                # was the unlogged root cause of the false-booking-
+                # confirmation gap found during the live incident
+                # investigation.
+                self.logger.warning(
+                    f"[GoogleCalendarProvider] Calendar not connected "
+                    f"(business_id={self.business_id!r}, "
+                    f"conversation_id={conversation_id}) -- calendar_booking "
+                    f"is enabled but no availability can be offered this turn."
+                )
                 return plan
 
             windows = self.calendar_provider.get_free_busy_windows(self.business_id)
