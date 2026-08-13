@@ -9,11 +9,11 @@ class Config:
 
     MODEL = os.getenv(
         "MODEL",
-        "llama-3.3-70b-versatile"
+        "openai/gpt-oss-120b"
     )
 
     MAX_TOKENS = int(
-        os.getenv("MAX_TOKENS", 400)
+        os.getenv("MAX_TOKENS", 800)
     )
 
     TEMPERATURE = float(

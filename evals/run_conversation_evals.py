@@ -42,6 +42,7 @@ from utils.llm import LLM  # noqa: E402
 from tests.test_pricing_knowledge_scoping import (  # noqa: E402
     _ALLOWED_DOLLAR_FIGURES,
     _DOLLAR_PATTERN,
+    strip_approved_shorthand_range,
 )
 
 RUNS_PER_SCENARIO = 3
@@ -197,8 +198,14 @@ def no_price_leak(response_text: str) -> bool:
     staff-cost comparison allowlist (see
     tests/test_pricing_knowledge_scoping.py's _ALLOWED_DOLLAR_FIGURES --
     imported above, not duplicated here).
+
+    The approved comparison is stripped first if it appears in
+    abbreviated form ("$1.5-3 K" rather than "$1,500"/"$3,000") -- see
+    strip_approved_shorthand_range's docstring for why _DOLLAR_PATTERN
+    can't recognize that phrasing on its own.
     """
-    found = _DOLLAR_PATTERN.findall(response_text)
+    scrubbed = strip_approved_shorthand_range(response_text)
+    found = _DOLLAR_PATTERN.findall(scrubbed)
     unapproved = [figure for figure in found if figure not in _ALLOWED_DOLLAR_FIGURES]
     return not unapproved
 
