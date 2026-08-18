@@ -35,7 +35,8 @@ PASS/FAIL line for every automated check on that scenario, then ends with
 a scenario x run summary table.
 
 **Exit code:**
-- `0` — every hard check (`no_price_leak`, `no_bot_admission`, `no_crash`)
+- `0` — every hard check (`no_price_leak`, `no_bot_admission`, `no_crash`,
+  `no_leaked_confirmation_instruction`, `no_fabricated_action_claim`)
   passed in every run.
 - `1` — at least one hard check failed somewhere. (`non_empty` failures
   and the buying-signal mention flag are informational only and never
@@ -44,14 +45,14 @@ a scenario x run summary table.
 
 ## Token budget — read this before trusting a FAIL
 
-A full pass is **~24 real LLM calls at ~2,600 tokens each, so ~62,000
+A full pass is **~27 real LLM calls at ~2,600 tokens each, so ~70,000
 tokens**. Groq's on-demand tier enforces two separate token limits, measured
 2026-07-30 on `llama-3.3-70b-versatile`:
 
 | Limit | Value | Behaviour |
 |---|---|---|
 | Tokens per minute (TPM) | 12,000 | Refills continuously. A full pass is ~5x this, so it **will** be hit. |
-| Tokens per day (TPD) | 100,000 | Rolling ~24h window. A full pass is ~62% of it. |
+| Tokens per day (TPD) | 100,000 | Rolling ~24h window. A full pass is ~70% of it. |
 
 The runner handles these differently, because they need opposite responses.
 A TPM block is waited out (short constant retry). A TPD block cannot be
@@ -79,7 +80,7 @@ Use `--runs N` to shrink a pass when the budget is tight:
 python evals/run_conversation_evals.py --runs 1
 ```
 
-That is ~8 calls / ~21,000 tokens. Fewer runs is a weaker signal against LLM
+That is ~9 calls / ~23,000 tokens. Fewer runs is a weaker signal against LLM
 non-determinism, not a different check — a failure at `--runs 1` is still a
 real failure.
 
@@ -91,6 +92,8 @@ real failure.
 | `no_bot_admission` | The response admits to being an AI/bot/language model (case-insensitive phrase match). |
 | `non_empty` | The response is blank or whitespace-only. Informational — doesn't affect exit code. |
 | `no_crash` | `process_message()` raised an exception for that turn. |
+| `no_leaked_confirmation_instruction` | The response parrots PromptBuilder's own internal BOOKING CONFIRMED instruction sentence back to the visitor instead of confirming naturally. |
+| `no_fabricated_action_claim` | The response claims to have already performed an action (sent an email, set up an account, created a document, registered the visitor, etc.) that nothing in this codebase can actually do. Guards ENGINE_RULES rule #12 in `core_ai/prompt_builder.py` — the general form of the booking-hallucination fix, covering the live-verification gap where Bray claimed to have emailed a checklist that was never sent. |
 
 ## Adding a new scenario
 

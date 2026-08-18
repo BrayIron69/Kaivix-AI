@@ -58,7 +58,7 @@ RUNS_PER_SCENARIO = 3
 #   tokens per day   (TPD): 100,000, rolling ~24h window
 #
 # One eval turn costs ~2,600 tokens (the whole system prompt, including up
-# to three knowledge documents). So a 3-run pass is ~24 calls / ~62,000
+# to three knowledge documents). So a 3-run pass is ~27 calls / ~70,000
 # tokens: comfortably inside TPD when the day is fresh, but ~5x the
 # per-minute budget, meaning TPM WILL be hit and is worth waiting out.
 #
@@ -76,7 +76,7 @@ RUNS_PER_SCENARIO = 3
 # every attempt, the provider is refusing sustained -- treat it as a hard
 # block and fail the remaining calls IMMEDIATELY rather than re-waiting the
 # full budget for each. Without that, a TPD-blocked run spends
-# attempts x backoff on all ~24 calls (over an hour) to learn what the
+# attempts x backoff on all ~27 calls (over an hour) to learn what the
 # first call already established.
 #
 # A constant wait rather than exponential backoff: the TPM limiter is a
@@ -154,7 +154,13 @@ def with_rate_limit_retry(generate):
 # Checks whose failure makes the whole eval run exit non-zero. non_empty
 # and the buying-signal mention are informational only (see Scenario /
 # CheckResult below).
-_HARD_CHECKS = {"no_price_leak", "no_bot_admission", "no_crash", "no_leaked_confirmation_instruction"}
+_HARD_CHECKS = {
+    "no_price_leak",
+    "no_bot_admission",
+    "no_crash",
+    "no_leaked_confirmation_instruction",
+    "no_fabricated_action_claim",
+}
 
 # Verbatim internal system-prompt phrasing from PromptBuilder's BOOKING
 # CONFIRMED section (core_ai/prompt_builder.py) -- the live-verification
@@ -184,6 +190,47 @@ _BOOKING_MENTION_PHRASES = (
     "calendly",
     "schedule",
     "calendar",
+)
+
+# Verbatim-ish first-person claims that some action was already carried
+# out. Nothing in Bray's tooling can actually send an email, generate a
+# document, or set up an account mid-chat -- the live-verification gap
+# this guards against was Bray telling a visitor "I've sent you a
+# checklist" when no email was ever sent, no dedicated PromptBuilder
+# section (see core_ai/prompt_builder.py) ever confirms that, and no
+# such action is possible from this codebase at all. Deliberately
+# broader than the booking-specific phrases above, since ENGINE_RULES
+# rule #12 is the general case and rule #11 (booking) already has its
+# own dedicated check (no_leaked_confirmation_instruction covers the
+# adjacent phrasing regression, not this).
+_FABRICATED_ACTION_CLAIM_PHRASES = (
+    "i've sent",
+    "i have sent",
+    "i just sent",
+    "i sent you",
+    "sent you an email",
+    "sent it to your email",
+    "emailed you",
+    "i've emailed",
+    "i have emailed",
+    "check your inbox",
+    "check your email",
+    "i've set up",
+    "i have set up",
+    "i just set up",
+    "all set up for you",
+    "you're all set",
+    "i've created",
+    "i have created",
+    "i've added you",
+    "i have added you",
+    "i've scheduled",
+    "i have scheduled",
+    "on its way to your inbox",
+    "should be in your inbox",
+    "you'll receive it shortly",
+    "i've registered",
+    "i have registered",
 )
 
 
@@ -236,6 +283,18 @@ def no_leaked_confirmation_instruction(response_text: str) -> bool:
     )
 
 
+def no_fabricated_action_claim(response_text: str) -> bool:
+    """
+    Fails if Bray claims to have already performed some action (sent an
+    email, set up an account, created a document, registered the
+    visitor, etc.) that nothing in this codebase can actually do and
+    that no dedicated PromptBuilder section confirmed this turn. See
+    ENGINE_RULES rule #12 in core_ai/prompt_builder.py.
+    """
+    lowered = response_text.lower()
+    return not any(phrase in lowered for phrase in _FABRICATED_ACTION_CLAIM_PHRASES)
+
+
 # no_crash is not a text-based check -- it's whether process_message()
 # raised for that turn. Handled directly in run_scenario() below.
 
@@ -245,6 +304,7 @@ _TEXT_CHECKS = {
     "no_bot_admission": no_bot_admission,
     "non_empty": non_empty,
     "no_leaked_confirmation_instruction": no_leaked_confirmation_instruction,
+    "no_fabricated_action_claim": no_fabricated_action_claim,
 }
 
 
@@ -303,6 +363,20 @@ SCENARIOS: list[Scenario] = [
         name="gibberish_robustness",
         messages=["asdkfj q23p9 %%% ??? blorgotron zzzxcv nonsense input"],
         checks=["no_crash", "non_empty"],
+    ),
+    # The exact scenario found in live verification: a visitor asks for
+    # something this codebase has no mechanism to deliver (no email
+    # tool, no document generator). ENGINE_RULES rule #11 already
+    # guards the sibling case -- Bray inventing a booking mechanism/
+    # status with nothing confirming it. This scenario proves the new,
+    # general rule #12 covers the other instance of the same gap: Bray
+    # claiming to have emailed a checklist that was never sent, instead
+    # of saying honestly that it can't do that from here and offering a
+    # real alternative (the Calendly link).
+    Scenario(
+        name="fabricated_action_checklist_email",
+        messages=["can you email me a checklist of everything I need to prepare before we start?"],
+        checks=["no_fabricated_action_claim", "non_empty", "no_crash"],
     ),
 ]
 
@@ -525,7 +599,7 @@ def print_summary_table(all_results: dict[str, list[RunResult]]) -> bool:
     (True if every hard check passed in every run of every scenario)."""
 
     print("=" * 78)
-    print("SUMMARY (hard checks only: no_price_leak, no_bot_admission, no_crash)")
+    print(f"SUMMARY (hard checks only: {', '.join(sorted(_HARD_CHECKS))})")
     print("=" * 78)
 
     header = f"{'scenario':<32}" + "".join(f"run{n + 1:<6}" for n in range(RUNS_PER_SCENARIO))

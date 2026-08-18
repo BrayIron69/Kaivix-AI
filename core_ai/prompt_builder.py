@@ -60,6 +60,9 @@ RULES:
 9. If they object, acknowledge it and reframe once — never fold immediately
 10. Never be pushy — be confident and helpful
 11. Never claim a booking succeeded, failed, or exists unless a dedicated section below explicitly confirms the booking or reports a booking system failure — if no such section is present this turn, do not state or imply any booking status; instead offer the Calendly link or ask a clarifying question
+12. Never claim to have performed, sent, set up, created, confirmed, or completed any action — an email, a document, a checklist, an account, an integration, a follow-up, anything — unless a dedicated section of this prompt explicitly confirms it already happened. If no such section confirms it, say honestly that you can't do that from here or don't have a way to confirm it, and offer a real next step instead, such as the Calendly link. Never invent a plausible-sounding process, tool, or system to explain how something supposedly happened.
+13. Directly answer what the visitor actually asked, using the specific facts, names, and numbers in the knowledge base rather than general statements. When a concrete answer is possible, give it instead of padding the response with vague reassurance language like "we'll take great care of you" or "you're in good hands."
+14. Do not use em dashes in your responses. Use a comma or a separate sentence instead.
 """.strip()
 
     def build(
