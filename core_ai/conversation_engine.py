@@ -1,6 +1,7 @@
 from dataclasses import replace
 from typing import Optional
 
+from core_ai.action_claim_gate import find_unbacked_action_claim
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.lead_profile import LeadProfile
@@ -258,6 +259,7 @@ class ConversationEngine:
 
         messages = self._build_messages(system_prompt, history)
         response = self._generate_response(conversation_id, messages)
+        response = self._apply_action_claim_gate(conversation_id, response, plan)
 
         self.memory.add_assistant_message(conversation_id, response)
 
@@ -627,6 +629,46 @@ class ConversationEngine:
                 f"(conversation_id={conversation_id}): {error}"
             )
             raise
+
+    def _apply_action_claim_gate(
+        self, conversation_id: str, response: str, plan: ConversationPlan
+    ) -> str:
+        """
+        Deterministic pre-delivery gate: catches the LLM claiming an
+        action (email, an alternate booking mechanism, human handoff)
+        that nothing in this codebase can actually perform, and
+        replaces the response before it ever reaches the visitor.
+
+        ENGINE_RULES rule #12 asks the model not to do this; this is
+        the code-level backstop for when it does anyway -- see
+        core_ai/action_claim_gate.py for what's actually matched and
+        why. Every substitution is logged loudly (WARNING, not INFO)
+        with the caught category, the same discipline as the
+        booking-hallucination logging gaps closed earlier: a real
+        fabrication caught silently is not meaningfully different from
+        one that reaches the visitor.
+        """
+        category = find_unbacked_action_claim(response, plan)
+        if category is None:
+            return response
+
+        self.logger.warning(
+            f"[ActionClaimGate] Unbacked '{category}' action claim caught "
+            f"and replaced (conversation_id={conversation_id}). "
+            f"Original response: {redact_free_text(response)!r}"
+        )
+
+        booking_link = self.business_config.persona.booking_link or ""
+        if booking_link:
+            return (
+                "I can't actually do that from here, but I'd love to get you "
+                f"sorted -- grab a time that works for you here and we can go "
+                f"through it live: {booking_link}"
+            )
+        return (
+            "I can't actually do that from here, but I'm happy to walk "
+            "through it with you directly -- what would you like to know?"
+        )
 
     # ------------------------------------------------------------------
     # Memory
