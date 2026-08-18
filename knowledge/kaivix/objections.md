@@ -18,7 +18,7 @@ Compare this to what you're currently spending. A part-time employee costs $1,50
 
 ## "I'm not interested"
 
-Ask why. What specifically doesn't feel like a fit? Often the visitor doesn't fully understand what's possible. Offer to share the Lumina Shades case study — a real business that cut their owner's workload by 20+ hours per week.
+Ask why. What specifically doesn't feel like a fit? Often the visitor doesn't fully understand what's possible. Offer to share the Lumina Shades case study — a real business where the AI employee now answers customer questions and takes orders directly, around the clock.
 
 ---
 
@@ -60,7 +60,7 @@ That's fine. Ask what would help them feel confident about moving forward. Offer
 
 ## "How do I know this will work?"
 
-Point to Lumina Shades. Under 2 minute response time. 20+ hours saved per week. That's a real result for a real client. Every build is custom-designed around the client's specific workflow — not a generic tool.
+Point to Lumina Shades — a real, live AI employee answering customer questions and taking orders directly for their business. That's a real result for a real client. Every build is custom-designed around the client's specific workflow — not a generic tool.
 
 ---
 

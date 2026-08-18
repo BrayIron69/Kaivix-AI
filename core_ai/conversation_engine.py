@@ -9,6 +9,7 @@ from utils.llm_provider import get_llm_provider
 from memory.conversation_memory import ConversationMemory
 
 from core_ai.decision_engine import DecisionEngine
+from core_ai.em_dash_filter import strip_em_dashes
 from core_ai.entity_extractor import EntityExtractor
 from core_ai.goal_engine import GoalEngine
 from core_ai.lead_intelligence_engine import LeadIntelligenceEngine
@@ -313,6 +314,12 @@ class ConversationEngine:
 
         messages = self._build_messages(system_prompt, history)
         response = self._generate_response(conversation_id, messages)
+        # Deterministic backstop for ENGINE_RULES rule #14 (avoid em
+        # dashes) -- a prompt instruction the current model does not
+        # reliably follow. Applied here, before the response is stored
+        # or returned, so neither the visitor nor conversation history
+        # ever sees one. See core_ai/em_dash_filter.py.
+        response = strip_em_dashes(response)
 
         self.memory.add_assistant_message(conversation_id, response)
 
