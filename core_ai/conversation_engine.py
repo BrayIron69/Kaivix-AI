@@ -17,6 +17,7 @@ from core_ai.planning_engine import PlanningEngine
 from core_ai.prompt_builder import PromptBuilder
 from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
+from core_ai.unbacked_action_detector import UnbackedActionCategory, UnbackedActionDetector
 from core_ai.working_memory import WorkingMemory
 from scheduling.google_calendar_provider import GoogleCalendarProvider
 from scheduling.slot_matcher import match_offered_slot
@@ -70,6 +71,32 @@ class ConversationEngine:
     # feature off without disconnecting the calendar entirely.
     _CALENDAR_BOOKING_TOOL = "calendar_booking"
 
+    # Fixed, honest responses for each UnbackedActionCategory -- see
+    # _maybe_decline_unbacked_action. Python owns this text completely;
+    # the LLM never generates or rephrases it. {booking_link} is filled
+    # in from this business's own persona config at use time.
+    _UNBACKED_ACTION_TEMPLATES = {
+        UnbackedActionCategory.OUT_OF_CHAT_MESSAGE: (
+            "I don't have a way to send anything outside this chat -- no "
+            "email, text, or file delivery from here. I'm happy to go "
+            "through it with you right now, or you're welcome to grab a "
+            "time on the calendar and we can cover it live: {booking_link}"
+        ),
+        UnbackedActionCategory.ALTERNATE_BOOKING_MECHANISM: (
+            "The only way I can actually book with you is right here in "
+            "this chat -- I don't have a way to send booking links, "
+            "times, or confirmations by email or text. If real times are "
+            "available I'll list them right here as numbered options. In "
+            "the meantime, here's my calendar directly: {booking_link}"
+        ),
+        UnbackedActionCategory.HUMAN_HANDOFF: (
+            "I don't have a way to transfer you to someone else from "
+            "this chat right now. If you'd like to talk to a real person "
+            "on the team, the fastest way is booking time directly: "
+            "{booking_link}"
+        ),
+    }
+
     def __init__(
         self,
         summary_refresh_interval_turns: int = _SUMMARY_REFRESH_INTERVAL_TURNS,
@@ -103,6 +130,7 @@ class ConversationEngine:
         self.lead_intelligence_engine = LeadIntelligenceEngine()
         self.planning_engine = PlanningEngine(business_config=self.business_config)
         self.qualification_engine = QualificationEngine(business_config=self.business_config)
+        self.unbacked_action_detector = UnbackedActionDetector()
         self.prompt_builder = PromptBuilder()
         self.lead_service = LeadService(
             crm_provider=self.business_config.providers.crm_provider
@@ -159,6 +187,24 @@ class ConversationEngine:
 
         history = self._record_user_message(conversation_id, user_message)
         lead = self._update_lead_profile(conversation_id, user_message)
+
+        # Deterministic gate, checked before any classification or LLM
+        # work happens: if the visitor is asking for something this
+        # system has no real backing for (see
+        # _maybe_decline_unbacked_action), Python owns the entire
+        # response and the model never gets a turn. Placed right after
+        # lead/CRM state is updated (so any info given alongside the
+        # request is still captured) and before everything else, since
+        # nothing downstream is relevant to a response the model never
+        # generates.
+        unbacked_action_response = self._maybe_decline_unbacked_action(user_message)
+        if unbacked_action_response is not None:
+            self.memory.add_assistant_message(conversation_id, unbacked_action_response)
+            self.logger.info(
+                f"[UnbackedActionDetector] Deterministic decline used "
+                f"(conversation_id={conversation_id}, business_id={self.business_id!r})"
+            )
+            return unbacked_action_response
 
         intent = self.decision_engine.detect_intent(user_message)
 
@@ -361,6 +407,30 @@ class ConversationEngine:
                 f"[LeadService] Failed to save lead "
                 f"(conversation_id={conversation_id}): {error}"
             )
+
+    # ------------------------------------------------------------------
+    # Unbacked action requests
+    # ------------------------------------------------------------------
+
+    def _maybe_decline_unbacked_action(self, user_message: str) -> Optional[str]:
+        """
+        Deterministic gate for a visitor asking Bray to do something this
+        system has no real code path for -- see
+        core_ai/unbacked_action_detector.py's docstring for the incident
+        this responds to and the full reasoning.
+
+        Returns the fixed, honest response text when user_message matches
+        one of UnbackedActionDetector's categories, or None when it
+        doesn't (the normal pipeline runs as before). Never raises: the
+        detector is pure regex matching over a string, with no I/O to
+        fail.
+        """
+        category = self.unbacked_action_detector.detect(user_message)
+        if category is None:
+            return None
+
+        booking_link = self.business_config.persona.booking_link or ""
+        return self._UNBACKED_ACTION_TEMPLATES[category].format(booking_link=booking_link)
 
     # ------------------------------------------------------------------
     # Classification
