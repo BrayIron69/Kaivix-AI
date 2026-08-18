@@ -76,6 +76,26 @@ Suggested response:
 
 ---
 
+## "How are you different from Podium?"
+
+Podium is a larger, well-established company doing AI-powered customer communications for local businesses — real, credible, and a legitimate option in this space. It's built for a different scale of operation than a single small business working directly with one small team.
+
+Suggested response:
+
+"Podium is a solid, well-known option, and it's built for a different scale of operation. With Kaivix Labs, you work directly with the small team actually building and running your AI employee, not a large platform."
+
+---
+
+## "How are you different from Cogent Labs?"
+
+Cogent Labs (cogentlabs.co) is a real, credible AI consultancy with strong credentials, including work with larger and enterprise-adjacent organizations. Their model starts with a paid audit before any building begins, followed by a custom build priced for a larger budget than most small businesses have to spend.
+
+Suggested response:
+
+"Cogent Labs does real, credible work, but their process starts with a paid audit before anything gets built, aimed at larger budgets. Kaivix Labs skips that audit step entirely — you get a working AI employee built directly, at a fraction of that entry cost, with no gate before the real work starts."
+
+---
+
 ## General Guidelines
 
 Bray should:

@@ -1,46 +1,21 @@
 # Case Studies
 
-## Lumina Shades — AI Customer Support Employee
+## Lumina Shades
 
-**Client:** Lumina Shades
-**Industry:** Ecommerce — Sunglasses Retail
-**Location:** United States
-**Status:** Live
-
-### The Problem
-
-The founder was spending 3 or more hours every day manually answering the same customer questions across email and social media. Response time averaged several hours. The same questions were repeated by customers every single day — product specs, order status, shipping, returns.
-
-### What Kaivix Labs Built
-
-A custom AI support employee trained on Lumina Shades' product catalog, policies, and tone. The AI employee now handles all routine customer communication automatically, 24 hours a day, 7 days a week.
-
-### What the AI Employee Handles
-
-- Product questions (lens types, UV protection, frame sizing, materials)
-- Order status and shipping inquiries
-- Return and exchange requests within policy
-- FAQ responses
-- Escalation of complex cases to the founder with a full summary
-
-### Results
-
-- Response time: from hours to under 2 minutes at any hour
-- Owner time saved: 20+ hours every week
-- Coverage: email, DMs, and FAQ queries
-- Uptime: 24/7, no breaks, no sick days
-
-### Before and After
-
-Before: The founder personally replied to every customer message, often outside business hours.
-
-After: The AI employee handles all routine contacts. The founder only sees complex cases that genuinely need a human decision. Everything else is resolved automatically.
+Lumina Shades is a well-known name in the South Asian glasses market. Kaivix Labs built them an AI employee that answers customer questions and takes orders directly, handling that work for the business around the clock.
 
 ---
 
-## Open Slots
+## AION Labs
 
-Kaivix Labs is currently accepting 2 new clients.
+Kaivix Labs built AION Labs a customer support AI employee that handles customer questions and answers, giving the business a consistent, always-on first line of support.
 
-If a visitor asks about results or proof, share the Lumina Shades case study above.
-If they want to be next, direct them to book a free demo call.
+---
+
+## Atom Medicals
+
+Atom Medicals is a US medical practice. Kaivix Labs built them an appointment scheduling AI employee that handles booking and rescheduling, including collecting a patient's insurance information as part of the booking flow. The AI employee collects that information — it does not verify or process insurance itself. A real person on the practice's team handles that from there.
+
+---
+
+If a visitor asks about results or proof, share whichever case study above is closest to their own business.

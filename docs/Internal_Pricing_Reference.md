@@ -46,6 +46,13 @@ Currently offered to the first two clients:
 
 ---
 
+## Payments
+
+- A 50% deposit is collected before work begins on a project.
+- The rest of the payment schedule beyond the deposit is not yet documented here — confirm with the founder before quoting it on a call.
+
+---
+
 ## Notes
 
 - These figures are the source of truth removed from `knowledge/kaivix/pricing.md`
