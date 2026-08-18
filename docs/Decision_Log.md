@@ -1607,6 +1607,132 @@ Leaving the single-tenant scoping as-is (rather than adding a `business_id` path
 
 ---
 
+# Decision #029
+
+## LLM Migration To `openai/gpt-oss-120b`
+
+**Date**
+
+2026-08-14
+
+**Status**
+
+Accepted
+
+### Context
+
+Groq was decommissioning `llama-3.3-70b-versatile`, the model `Config.MODEL` had used since the provider-registry work (Decision #022). This made the migration forced, not optional — the question was which model to move to and what else would break in the process, not whether to move.
+
+**Correcting a premise handed to this entry**: the instructions that produced this Decision Log entry asked for "why GPT OSS 120B over Qwen 3.6." No mention of Qwen, Qwen 3.6, or any comparative model evaluation exists anywhere in this repository — not in the migration commit (`e64bdcd`), not in `config.py`, not in any doc. Per this document's own standing rule (read the actual commits, don't reconstruct from memory of what was discussed), that comparison is not recorded here as fact, because it isn't backed by anything. If a real Qwen-vs-GPT-OSS evaluation happened, it happened outside this repository's history, and belongs in this entry only once someone can point to where.
+
+### Decision
+
+Migrate to `openai/gpt-oss-120b` (`config.py`'s `MODEL` default), raise `MAX_TOKENS` to accommodate the new model's reasoning-style output, and fix `no_price_leak`'s shorthand-range recognition (`evals/run_conversation_evals.py`, `tests/test_pricing_knowledge_scoping.py`) so it correctly recognizes the approved `$1,500`/`$3,000` comparison when the new model paraphrases it as an abbreviated range (e.g. `$1.5-3 K`) instead of the exact figures.
+
+### Reasoning
+
+The decommission made timing non-negotiable, so the real decision was scoping the migration correctly rather than deferring or partially doing it: a reasoning-style model needed a higher token ceiling to avoid truncating mid-response, and the existing price-leak eval check was written against the old model's exact-figure phrasing habits, not the new model's — leaving it unfixed would have meant the safety check silently stopped protecting against the shorthand case as soon as the model changed, discovered only if someone happened to read a transcript closely.
+
+Two follow-on style calibrations for the new model (specificity instructions, em-dash avoidance) were made separately as part of the fabricated-action-claims fix (Decision #030) rather than bundled here, since they were a response to observed output style, not part of the forced migration itself.
+
+### Consequences
+
+**Benefits**
+- Migration completed ahead of the decommission date, no service interruption
+- `MAX_TOKENS` sized for the new model's actual output pattern rather than left at the old model's default
+- The price-leak safety check verified to still catch the new model's paraphrasing style, not just the old one's
+
+**Trade-offs**
+- No comparative evaluation against alternative models is on record for this migration — it was driven by a forced decommission, not a selection process. A future model change (elective, not forced) should record that comparison explicitly if one is done.
+- The new model's general output style (verbosity, em-dash frequency, response specificity) required separate follow-on tuning (Decision #030's related work) rather than being anticipated here.
+
+---
+
+# Decision #030
+
+## Deterministic Code-Level Gate Adopted Over The Prompt-Only Rule For Fabricated Action Claims
+
+**Date**
+
+2026-08-18
+
+**Status**
+
+Accepted
+
+### Context
+
+Two related live incidents, both real visitors, both from the same underlying gap: a visitor was told to "check your email and select a time" to confirm a booking — a mechanism that has never existed in this codebase, real booking has always been numbered options inside the chat (partially addressed by `60b3e81`) — and a visitor was told a checklist "had been emailed," twice, when no email-sending code existed anywhere in the system at the time.
+
+The first fix (`3b207dc`) was a new, general ENGINE_RULES rule (#12): never claim to have performed an action unless a dedicated prompt section confirms it. It read well and passed review. `core_ai/unbacked_action_detector.py`'s own docstring, written once real usage data existed, records what actually happened next: *"ENGINE_RULES rule 12 asks the model never to fabricate an action, but live production testing found it only holds about half the time — it is a soft instruction with nothing actually enforcing it."*
+
+**Correcting a second premise handed to this entry**: the instructions that produced this Decision Log entry described the deterministic gate as having "proved reliable at 10 for 10 against real production." No commit, test, or docstring in this repository records a 10-run (or any-count) live-production trial of either the prompt rule or the gate. What the repository does record is a **20-run structural test with the LLM call itself forbidden** (`tests/test_conversation_engine_unbacked_actions.py::TestUnbackedActionTwentyRunDeterminism`), whose own docstring explicitly frames this as a *stronger* form of proof than live sampling, not a report of live sampling: *"That is deliberately a stronger proof than 20 live network calls to the real model would be... the rigorous claim to verify is 'the model is structurally never consulted,' not 'the model happened to behave 20 times in a row.'"* Separately, real end-to-end verification against an actual deployed production instance was attempted multiple times in this milestone (both for this gate and for the later email feature) and did not complete, blocked by environment/network/credential access — see `docs/Current_Status.md`'s Known Issues. That remains genuinely open, not resolved by this decision.
+
+While the prompt-rule fix (`3b207dc`) was in progress, a real code-level gate was independently built twice, concurrently, by two sessions unaware of each other: `core_ai/unbacked_action_detector.py` (pushed directly to `main` as `6339e1c`) and `core_ai/action_claim_gate.py` (built on a stale feature branch, `7351e55`). Caught before either was blindly merged over the other, by checking real git state rather than trusting either session's account of what had landed.
+
+### Decision
+
+The deterministic, Python-owned gate (`core_ai/unbacked_action_detector.py` + `ConversationEngine._maybe_decline_unbacked_action`, checked before intent classification or any LLM call) is the actual guarantee against fabricated action claims. It structurally removes the LLM from the decision for three categories (out-of-chat messages, alternate booking mechanisms, human handoff) and one conditionally-backed category (`CONVERSATION_SUMMARY_EMAIL`, added later in this milestone). ENGINE_RULES rule #12 stays in the prompt as a first line of defense — catching a fabrication that's never generated at all is strictly better than catching it after — but is no longer the thing anything relies on for the guarantee itself.
+
+The duplicate implementation (`action_claim_gate.py`) was reverted with `git revert` (not a history rewrite — it had already been pushed) rather than force-discarded, and the feature branch was rebuilt on top of the surviving implementation via a normal merge before fast-forwarding into `main`.
+
+### Reasoning
+
+A prompt instruction is a request the model can decline, and per the docstring evidence above, this one was declined roughly half the time in real use — a coin flip is not a fix. A regex-based, pre-LLM check has no such failure mode: either the visitor's message matches a known-unbacked pattern and Python owns the entire response, or it doesn't and the LLM proceeds normally. There is no step where the model gets to decide whether to comply.
+
+On the duplicate-work incident: reverting rather than force-merging preserved both implementations' git history and let the surviving one be chosen deliberately (the one already on `main`, requiring the least disruption) rather than by which session pushed first. This is the same failure mode Milestone 6's Decision Log period already produced and wrote a standing rule against — recorded again in Milestone 7's Lessons Learned rather than treated as fully resolved by that rule's existence.
+
+### Consequences
+
+**Benefits**
+- Fabricated action claims for three permanently-unbacked categories are now structurally impossible, not merely discouraged
+- The one category that can be genuinely backed (conversation-summary email) is gated on real, checkable conditions (a granted OAuth scope, a known email address) rather than the model's self-report
+- The near-duplicate-merge incident was caught by process (checking real git state) before it caused damage, consistent with Milestone 6's standing rule
+
+**Trade-offs**
+- The gate's phrase-matching is necessarily incomplete — a fabrication phrased in a way no pattern anticipates could still reach the LLM and rely on rule #12 alone, which is back to a soft guarantee for anything outside the gate's known categories
+- No live-production verification of the gate's real-world hit rate exists on record, for either the old rule or the new gate — the 20-run proof is structural, not empirical, and remains the strongest evidence actually on file
+- Real end-to-end verification against the deployed instance is still an open item, not closed by this decision
+
+---
+
+# Decision #031
+
+## Knowledge Base Dollar-Figure Guardrail Left Intact Rather Than Widened For Competitor Pricing
+
+**Date**
+
+2026-08-18
+
+**Status**
+
+Accepted
+
+### Context
+
+The knowledge base rewrite (`c962b5e`) called for a real, verified competitor comparison against Cogent Labs (`cogentlabs.co`), including specific figures independently confirmed via web search directly against that company's own pages: a $3,000 AI audit and $15K-$75K custom builds. `tests/test_pricing_knowledge_scoping.py::test_no_unapproved_dollar_figures_in_loaded_documents` scans every document `KnowledgeBase` can load for any dollar figure and fails on anything outside the exact allowlist `{"$1,500", "$3,000"}` — a blanket, structural block put in place after a real incident where Bray quoted exact prices to unqualified visitors (Decision #016). The test does not distinguish "Kaivix's own price" from "a competitor's publicly stated price"; it blocks any dollar figure, full stop. Writing "$15,000"/"$75,000" verbatim into `competitors.md` would have failed it. ("$3,000" happens to already be on the allowlist, but only by coincidence — for Kaivix's own staff-cost comparison, not for Cogent Labs' audit fee.)
+
+### Decision
+
+The guardrail was left exactly as it is. `competitors.md`'s Cogent Labs comparison was written qualitatively instead — "a paid audit before any building begins," "priced for a larger budget than most small businesses have," "a fraction of that entry cost" — conveying the same real, verified differentiation without a literal dollar sign anywhere in the text.
+
+### Reasoning
+
+Widening `_ALLOWED_DOLLAR_FIGURES` (or otherwise carving out an exception for competitor pricing) is a real change to a safety boundary that exists for a specific, documented reason, and is not something to decide unilaterally in the middle of a content-writing task. The qualitative phrasing fully satisfies the actual ask — an honest, specific, verified comparison — without touching that boundary at all, so there was no need to force the choice. Whether the guardrail should ever be scoped to distinguish "Kaivix's own unverified price" from "a competitor's independently verified, publicly stated price" is a legitimate future question, left open for the founder rather than answered silently here.
+
+### Consequences
+
+**Benefits**
+- The dollar-figure guardrail's original guarantee is unweakened: nothing added by this milestone can cause Bray to state a price it wasn't cleared to say
+- The Cogent Labs comparison is still real, specific, and independently verified — nothing about the honesty of the claim was sacrificed, only the literal digits
+- `test_no_unapproved_dollar_figures_in_loaded_documents` passes unmodified, confirmed by the full suite run
+
+**Trade-offs**
+- Bray cannot currently state Cogent Labs' exact pricing even though it's real, verified, third-party information a visitor might reasonably ask for — a strictly qualitative comparison is less concrete than the specific figures the founder originally asked to include
+- If the founder decides competitor pricing should be treated differently from Kaivix's own unqualified pricing, that requires a deliberate, separate change to the test's scope, not an incidental side effect of a future content edit
+
+---
+
 \---
 
 

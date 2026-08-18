@@ -2,7 +2,7 @@
 
 **Version:** 1.0
 **Status:** Active Development
-**Last Updated:** 2026-07-31
+**Last Updated:** 2026-08-18
 
 ---
 
@@ -33,10 +33,10 @@ Kaivix Core is a reusable AI Employee platform designed to allow businesses to d
 AI Employee Version 1 (Roadmap Phase 1). Note: this document has historically called the current work "Phase 2", meaning the second half of AI Employee V1. `docs/Roadmap.md` uses "Phase 2" to mean Customer Validation. See Open Questions — the two documents disagree on the label, not on the work.
 
 **Current Milestone**
-Milestone 5 (Production Hardening & Appointment Scheduling) — complete, 2026-07-26. The work since then (bug-fix sweep, admin dashboard, LLM 503 fallback, provider registry, multi-business serving, per-business API keys, PII redaction — Decisions #021–#027) has **no milestone entry in `docs/Milestone_Log.md`** and no agreed name. See Open Questions.
+Milestone 7 (Model Migration, the Fabricated-Action-Claims Investigation, Real Gmail Sending, and a Knowledge Base Rewrite) — complete, 2026-08-18. See `docs/Milestone_Log.md`.
 
 **Overall Progress**
-🟩 BusinessConfig refactoring backlog complete (7/7). 🟩 Milestone 5 complete. 🟩 Post-Milestone-5: three of the four then-open Known Issues are now closed, an admin CRM dashboard exists, LLM provider failures degrade to a 503 instead of a 500, `providers.yaml` actually drives LLM and CRM selection, one process can serve many businesses, `POST /chat/{business_id}` is authenticated per business, and conversation turns are withheld from logs by default. **384 automated tests passing** (verified by running `python -m unittest discover -s tests` on 2026-07-31, not carried over from a previous doc revision).
+🟩 BusinessConfig refactoring backlog complete (7/7). 🟩 Milestone 5 complete. 🟩 Milestone 6 complete (post-Milestone-5 hardening: live outage fix, real provider interfaces, security review, Phase 5 authentication — see `docs/Milestone_Log.md`). 🟩 Milestone 7 complete: LLM migrated to `openai/gpt-oss-120b` (Groq decommissioned the prior model), a fabricated-action-claims gap closed with a real deterministic gate (not just a prompt rule — see Decision #030), real Gmail sending wired to the conversation-summary case, and a knowledge base content rewrite. **469 automated tests passing** (verified by running `python -m unittest discover -s tests` on 2026-08-18, not carried over from a previous doc revision).
 
 Not yet done: a real end-to-end booking test against a live calendar, and deployment + production testing. The conversation-quality eval suite is currently **unrunnable** against Groq's free tier — see Known Issues.
 
@@ -205,7 +205,7 @@ Note: `chat_widget.html` and the `/chat` API endpoint already exist and are func
 **Owner:** Evals / Infrastructure
 **Priority:** High — this is the designated pre-deploy safety net, and it currently cannot run
 
-A full eval pass is **~24 real LLM calls at ~2,600 tokens each, so ~62,000 tokens**. Groq's on-demand tier enforces two separate token limits, measured 2026-07-30 on `llama-3.3-70b-versatile`:
+A full eval pass is **~24 real LLM calls at ~2,600 tokens each, so ~62,000 tokens**. Groq's on-demand tier enforces two separate token limits, measured 2026-07-30 on `llama-3.3-70b-versatile` — **not yet re-measured against `openai/gpt-oss-120b`** (Decision #029), the model actually in use since 2026-08-14; the limits below may no longer be accurate for the current model:
 
 | Limit | Value | Behaviour |
 |---|---|---|
@@ -228,6 +228,20 @@ Practical options: pace a pass across days, trim the scenario set, or move the e
 **Priority:** High — recommended before real site visitors reach this feature
 
 Every calendar/booking behavior is proven with mocked unit tests (Google API and LLM calls fully mocked, 384 passing); the OAuth setup itself was separately verified with a real browser consent flow (confirmed real calendars listed). A full, deliberate end-to-end run — connect a real calendar via `/oauth/google/connect`, complete a real conversation through to a real booked event on `brayiron@kaivixlab.com`'s calendar, confirm and clean up — has not yet been performed.
+
+## Issue: Real end-to-end verification of the conversation-summary email feature not yet performed
+**Status:** Open, flagged not fixed
+**Owner:** Scheduling / Email
+**Priority:** High — recommended before this feature reaches real site visitors
+
+`scheduling/email_provider.py` and its wiring into the unbacked-action gate (Milestone 7, Decision #030) are proven with mocked unit tests only — no real Gmail API call has ever been made. Three things stand between here and a real, confirmed send: `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are not configured in any environment this work has been done in, no OAuth token is stored for any `business_id`, and `gmail.send` is a new scope — the founder must reconnect via `/oauth/google/connect` even if a prior calendar-only connection exists, since Google OAuth scopes are fixed at consent time and cannot be granted incrementally. Until all three are resolved and a real email is confirmed to arrive in a real inbox, this feature should be treated as unverified in production, regardless of test suite state.
+
+## Issue: `knowledge/kaivix/objections.md` references case-study metrics removed from `case_studies.md`
+**Status:** Open, flagged not fixed
+**Owner:** Knowledge
+**Priority:** Low
+
+The knowledge base rewrite (Milestone 7) replaced `case_studies.md`'s Lumina Shades entry with only the facts the founder gave for that rewrite, dropping the previously-published metrics (20+ hours/week saved, sub-2-minute response time). `objections.md` was out of scope for that rewrite and still states both figures in two places ("Offer to share the Lumina Shades case study — a real business that cut their owner's workload by 20+ hours per week" and "Point to Lumina Shades. Under 2 minute response time. 20+ hours saved per week."). Bray can now cite specific numbers from `objections.md` that no longer appear anywhere else in the knowledge base, and that were not reconfirmed as part of this rewrite. Needs a decision: reconfirm the figures and keep them, or bring `objections.md` in line with the new `case_studies.md`.
 
 ## Issue: `knowledge_provider` and `calendar_provider` still decorative
 **Status:** Open, deliberately deferred
@@ -291,7 +305,7 @@ No significant technical debt beyond the Known Issues above.
 - Backend: To Be Determined
 
 **LLM**
-- Groq (`llama-3.3-70b-versatile`), selected via `providers.llm_provider` through `utils/llm_provider.py`; the only registered LLM provider today
+- Groq (`openai/gpt-oss-120b`, migrated 2026-08-14 ahead of `llama-3.3-70b-versatile`'s decommission — Decision #029), selected via `providers.llm_provider` through `utils/llm_provider.py`; the only registered LLM provider today
 
 **Provider Abstraction**
 - Real for `llm_provider` and `crm_provider` — name-to-class registries, unknown names fail loudly at engine construction (Decision #022)

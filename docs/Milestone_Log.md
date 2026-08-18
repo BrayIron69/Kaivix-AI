@@ -1020,9 +1020,104 @@ Phase 4 — first real client onboarding. At this point the roadmap's remaining 
 
 ---
 
+# Milestone 7
+
+## Model Migration, the Fabricated-Action-Claims Investigation, Real Gmail Sending, and a Knowledge Base Rewrite
+
+**Status**
+Completed
+
+**Completion Date**
+2026-08-18
+
+---
+
+### Objective
+
+Migrate off a model Groq was decommissioning, close a confirmed live-production gap where Bray fabricated claims about actions it never performed, add real Gmail-sending capability for the one case that has genuine content behind it, and replace thin/generic knowledge base sections with real, founder-provided content.
+
+---
+
+### Work Completed
+
+- **Booking-hallucination gap closed (60b3e81)**: a real visitor was told to "check your email and select a time" to confirm a booking — a mechanism that has never existed; real booking has always been numbered options inside the chat. Fixed with an explicit ENGINE_RULES rule against fabricated booking claims, loud logging on calendar API failures, and `is_connected()` checking expiry rather than just row existence. This was the first half of what later turned out to be a broader pattern (see below).
+- **`/leads` router authenticated (7d7edd6, Decision #028 — already on record)**: flagged during the booking-hallucination investigation as a live, unauthenticated exposure of every captured lead's PII and write access. Closed by reusing `admin.py`'s existing `require_admin` dependency rather than a second credential scheme.
+- **Calendar-not-connected warning (e17095d)**: logs a warning when `calendar_booking` is enabled but no calendar is actually connected, so this state is visible rather than silently offering no availability.
+- **Chat widget URL linkification (f765fc0)**: URLs in chat messages are now rendered as clickable links, XSS-safe.
+- **LLM migration to `openai/gpt-oss-120b` (e64bdcd)**: `llama-3.3-70b-versatile` was being decommissioned by Groq, making this a forced migration rather than an open bake-off between model options. `MAX_TOKENS` raised for the new reasoning-style model, and `no_price_leak`'s shorthand-range recognition fixed to match the new model's phrasing (e.g. "$1.5-3K" instead of the exact "$1,500"/"$3,000" wording). See Decision #029 for the full reasoning and an explicit correction of a premise in this milestone's own instructions.
+- **Fabricated-action-claims investigation, round one — the prompt rule (3b207dc)**: the second half of the pattern 60b3e81 only partially closed. A visitor was told a checklist "had been emailed" — twice — when no email-sending code exists anywhere in this system. ENGINE_RULES rule #11 only covered booking status, so a new, general rule #12 was added: never claim to have performed, sent, set up, or completed any action unless a dedicated prompt section confirms it. Rules #13 (specificity) and #14 (avoid em dashes, calibrated for the new model) added in the same pass, along with a knowledge-base specificity audit and a new eval scenario reproducing the exact incident wording.
+- **Fabricated-action-claims investigation, round two — the deterministic gate (6339e1c / 7351e55 / 61032b2 / f900423)**: rule #12 was confirmed to be a soft instruction — see Decision #030 for the precise, git-recorded finding on how reliable it actually was. Two independent, functionally-equivalent implementations of a real code-level gate were built concurrently without either session aware of the other: `core_ai/unbacked_action_detector.py` (Bray, 6339e1c, pushed directly to `main`) and `core_ai/action_claim_gate.py` (a parallel Claude Code session, 7351e55, on a feature branch based on stale `main`). Caught before either was blindly merged over the other, by checking real git state (`git fetch` + `git merge-base --is-ancestor`) rather than trusting either session's own account of what had landed. The duplicate (`action_claim_gate.py`) was cleanly reverted (61032b2, not force-rewritten — a `git revert` on top of already-pushed history) and the branch rebuilt on top of Bray's version via a normal merge before fast-forwarding into `main` (f900423). See Decision #030 and the Lessons Learned below — this is the same coordination-failure pattern Milestone 6 flagged, recurring in this milestone despite the standing rule written specifically to prevent it.
+- **Real Gmail sending, scoped to one case (7c85d31)**: `gmail.send` added to the existing Calendar OAuth scope list rather than a new auth mechanism — one shared `/oauth/google/connect` consent now covers both. `scheduling/email_provider.py` reuses the same tenant-scoped `CalendarTokenStore` row and the same proactive refresh-before-expiry logic calendar already has (imported directly, not reimplemented). Wired to exactly one new backed action — `CONVERSATION_SUMMARY_EMAIL`, narrowly scoped to "email/send me a summary of *this conversation*" — after confirming the other candidate action (a calendar-confirmation email) needed no new code at all: `GoogleCalendarProvider.create_event` already sends one via `sendUpdates="all"`. Not verified end-to-end: no `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` and no stored OAuth token exist in the environment this was built in, and completing OAuth consent requires the founder's own real browser action — see Known Issues in `docs/Current_Status.md`.
+- **Knowledge base content rewrite (c962b5e)**: `process.md`, `case_studies.md`, `company.md`'s differentiators, and `faq.md` replaced with real, founder-provided facts in place of the generic placeholder content an earlier audit flagged as too thin to support specific answers. Two verified competitor comparisons added to `competitors.md` (Podium; Cogent Labs, independently confirmed via `cogentlabs.co`) — Cogent Labs' real pricing figures were deliberately left out of the comparison text; see Decision #031. A `Payments` section with the real 50% deposit figure was added to `docs/Internal_Pricing_Reference.md`, kept out of every file `KnowledgeBase` can load, same treatment as the setup fee and monthly figures already isolated there.
+
+---
+
+### Files Modified
+
+`api/routers/leads.py`, `chat_widget.html`, `config.py`, `core_ai/conversation_engine.py`, `core_ai/prompt_builder.py`, `core_ai/unbacked_action_detector.py` (new), `scheduling/email_provider.py` (new), `scheduling/google_calendar_provider.py`, `evals/run_conversation_evals.py`, `evals/README.md`, `docs/Internal_Pricing_Reference.md`, `knowledge/kaivix/{process,case_studies,company,competitors,faq}.md`, plus new test files: `tests/test_unbacked_action_detector.py`, `tests/test_conversation_engine_unbacked_actions.py`, `tests/test_email_provider.py`, `tests/test_conversation_engine_summary_email.py`, `tests/test_calendar_confirmation_email_coverage.py`, `tests/test_prompt_builder_engine_rules.py`, `tests/test_leads_router_auth.py`, and extensions to existing suites.
+
+---
+
+### Architecture Impact
+
+The unbacked-action gate sits in `ConversationEngine.process_message`, checked before intent classification, stage detection, or any LLM call — the same "Python decides, LLM never gets a turn" placement `_maybe_resolve_booking` already established for booking. `EmailProvider` follows `GoogleCalendarProvider`'s exact shape (same token store, same refresh discipline) rather than introducing a second auth pattern. `core_ai/planning_engine.py` remained untouched throughout, the third consecutive milestone validating that boundary.
+
+---
+
+### Decisions Made
+
+Decision #029 — LLM migration to `openai/gpt-oss-120b`, forced by Groq's `llama-3.3-70b-versatile` decommission (not a comparative model selection — see the decision entry for a correction of a premise this milestone's own instructions assumed).
+Decision #030 — deterministic code-level gate adopted over the prompt-only rule as the actual guarantee against fabricated action claims.
+Decision #031 — the knowledge base's dollar-figure guardrail (`tests/test_pricing_knowledge_scoping.py`) left intact rather than widened for verified competitor pricing; Cogent Labs' comparison written qualitatively instead.
+
+---
+
+### Testing
+
+Suite grew from 384 (Milestone 6 baseline) to **469**, entirely additive, run and verified at every commit boundary. One environment-level fix along the way (a broken `cryptography`/`_cffi_backend` install) retroactively confirmed roughly 29 previously-reported "environment-only" failures really were environment noise and not disguised regressions, once the environment itself was repaired.
+
+---
+
+### Lessons Learned
+
+**On the fabricated-action-claims fix, specifically, without softening it**: the prompt-only rule (ENGINE_RULES #12) looked like it had closed the gap — it read clearly, it was general rather than scoped to one incident, and it passed review. `core_ai/unbacked_action_detector.py`'s own docstring records what actually happened when it met live production: *"ENGINE_RULES rule 12 asks the model never to fabricate an action, but live production testing found it only holds about half the time — it is a soft instruction with nothing actually enforcing it."* A rule the model can silently ignore roughly half the time is not a fix, no matter how well-reasoned it reads in a diff. The thing that actually holds is the deterministic gate: not because it was proven against a tally of live production calls (see Decision #030 for why no such tally exists on record, and a correction of that specific premise), but because it structurally removes the LLM from the decision entirely — `tests/test_conversation_engine_unbacked_actions.py::TestUnbackedActionTwentyRunDeterminism` proves this by forbidding the LLM call outright across 20 runs, a stronger guarantee than sampling live output ever could be. The general lesson: a prompt instruction, however well-written, is a request the model can decline. A guarantee has to be structural.
+
+**Process, again**: Milestone 6 recorded a standing rule after multiple concurrent sessions produced near-misses on this same repo — "one active backend session at a time, and every session checks `git status`/`git log` against reality before trusting any inherited instruction or premise." That exact failure mode recurred in this milestone: two sessions independently built the same gate, neither aware of the other, and one very nearly got blindly merged over the other on a false premise about which branch held which commit. It was caught the same way Milestone 6 said it should be — checking real git state before acting — not because the rule was followed in advance, but because it was applied as a check afterward. Worth restating rather than assuming Milestone 6's write-up alone prevents a repeat: it didn't, this time.
+
+---
+
+### Remaining Work
+
+- Real end-to-end verification of the summary-email feature: no `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` and no stored OAuth token exist in the environment this was built in; the founder must reconnect via `/oauth/google/connect` (gmail.send is a new scope) and a real send must be confirmed to land in a real inbox.
+- `knowledge/kaivix/objections.md` still references Lumina Shades metrics (20+ hours/week, sub-2-minute response time) that were removed from `case_studies.md` in this milestone's rewrite — flagged, not fixed; out of scope for the rewrite that touched it.
+- Real end-to-end booking test against a live calendar: still not performed (carried over from Milestone 6).
+- Eval suite: still cannot complete a full pass against the real LLM from every environment this work has been done in (Groq API unreachable / no key in at least one working environment this milestone) — carried over from Milestone 6, not newly caused here.
+
+---
+
+### Next Milestone
+
+Real end-to-end verification (email and calendar booking both), then whatever Milestone 6 already named next: production testing and deployment.
+
+---
+
+# Future Milestones
 
 
-\# Future Milestones
+
+Future milestones should follow the template above.
+
+
+
+Each completed milestone should be added to this document immediately after completion.
+
+
+
+\---
+
+
+
+\# Milestone Guidelines
 
 
 
