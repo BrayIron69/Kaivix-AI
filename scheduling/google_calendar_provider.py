@@ -56,9 +56,22 @@ REDIRECT_URI = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000") + "/oauth/g
 
 # Read + write, unlike the throwaway verify script's read-only scope --
 # booking (a later milestone) needs to create events, not just read them.
+#
+# gmail.send added alongside the calendar scopes so the one existing
+# consent screen (get_authorization_url / handle_oauth_callback below,
+# reached via /oauth/google/connect) grants email-sending access too --
+# see scheduling/email_provider.py, which reads the exact same stored
+# token this class writes rather than running its own OAuth flow.
+# GOOGLE OAUTH SCOPES ARE FIXED AT CONSENT TIME: an account that
+# connected before this line existed has a stored token with only the
+# two calendar scopes below, and EmailProvider.is_connected() will
+# correctly report not-connected for it -- reconnecting via
+# /oauth/google/connect is the only way to add gmail.send to an
+# existing connection, there is no incremental-grant path here.
 SCOPES = [
     "https://www.googleapis.com/auth/calendar.readonly",
     "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.send",
 ]
 
 

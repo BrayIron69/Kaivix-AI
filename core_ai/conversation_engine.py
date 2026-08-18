@@ -19,6 +19,7 @@ from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
 from core_ai.unbacked_action_detector import UnbackedActionCategory, UnbackedActionDetector
 from core_ai.working_memory import WorkingMemory
+from scheduling.email_provider import EmailProvider
 from scheduling.google_calendar_provider import GoogleCalendarProvider
 from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
@@ -136,6 +137,12 @@ class ConversationEngine:
             crm_provider=self.business_config.providers.crm_provider
         )
         self.calendar_provider = GoogleCalendarProvider()
+        # Reuses the same Google connection calendar_provider does --
+        # see scheduling/email_provider.py's docstring. Not gated by
+        # _CALENDAR_BOOKING_TOOL: whether email-sending is usable is
+        # entirely determined by EmailProvider.is_connected() (real
+        # scope check) at the point of use, same as calendar_provider.
+        self.email_provider = EmailProvider()
 
         # Coordinates WorkingMemory (every turn), ConversationSummary
         # (every `summary_refresh_interval_turns` turns), and
@@ -197,7 +204,9 @@ class ConversationEngine:
         # request is still captured) and before everything else, since
         # nothing downstream is relevant to a response the model never
         # generates.
-        unbacked_action_response = self._maybe_decline_unbacked_action(user_message)
+        unbacked_action_response = self._maybe_decline_unbacked_action(
+            conversation_id, user_message, lead
+        )
         if unbacked_action_response is not None:
             self.memory.add_assistant_message(conversation_id, unbacked_action_response)
             self.logger.info(
@@ -412,25 +421,135 @@ class ConversationEngine:
     # Unbacked action requests
     # ------------------------------------------------------------------
 
-    def _maybe_decline_unbacked_action(self, user_message: str) -> Optional[str]:
+    def _maybe_decline_unbacked_action(
+        self, conversation_id: str, user_message: str, lead: LeadProfile
+    ) -> Optional[str]:
         """
         Deterministic gate for a visitor asking Bray to do something this
         system has no real code path for -- see
         core_ai/unbacked_action_detector.py's docstring for the incident
         this responds to and the full reasoning.
 
-        Returns the fixed, honest response text when user_message matches
-        one of UnbackedActionDetector's categories, or None when it
-        doesn't (the normal pipeline runs as before). Never raises: the
-        detector is pure regex matching over a string, with no I/O to
-        fail.
+        Returns Python-owned response text when user_message matches one
+        of UnbackedActionDetector's categories, or None when it doesn't
+        (the normal pipeline runs as before, LLM included). Never
+        raises: the detector itself is pure regex matching with no I/O,
+        and the one category with real I/O
+        (CONVERSATION_SUMMARY_EMAIL, delegated to
+        _handle_conversation_summary_email_request) reports its own
+        failures in-band rather than raising, the same contract
+        EmailProvider.send_email and GoogleCalendarProvider.create_event
+        already use for real, external, side-effecting calls.
         """
         category = self.unbacked_action_detector.detect(user_message)
         if category is None:
             return None
 
+        if category == UnbackedActionCategory.CONVERSATION_SUMMARY_EMAIL:
+            return self._handle_conversation_summary_email_request(conversation_id, lead)
+
         booking_link = self.business_config.persona.booking_link or ""
         return self._UNBACKED_ACTION_TEMPLATES[category].format(booking_link=booking_link)
+
+    def _handle_conversation_summary_email_request(
+        self, conversation_id: str, lead: LeadProfile
+    ) -> str:
+        """
+        Handle a CONVERSATION_SUMMARY_EMAIL match: send a real email when
+        it's actually deliverable, otherwise decline exactly as honestly
+        as the other unbacked categories -- never claim a send that
+        didn't happen.
+
+        Three real, checkable conditions gate an actual send attempt,
+        each with its own honest response when unmet:
+          1. EmailProvider.is_connected() -- gmail.send actually granted
+             for this business_id (see EmailProvider.is_connected's
+             docstring on why a stored row alone isn't enough). Unmet:
+             same fixed decline as OUT_OF_CHAT_MESSAGE -- from the
+             visitor's side this is indistinguishable from "no way to
+             send anything," which is still true until the founder
+             reconnects.
+          2. lead.email is known. Unmet: ask for it -- never invent an
+             address, never silently drop the request.
+          3. The real EmailProvider.send_email() call itself succeeds.
+             Unmet: apologize and fall back to the booking link, the
+             same pattern _maybe_resolve_booking's failure branch uses
+             for a failed calendar write.
+        """
+        booking_link = self.business_config.persona.booking_link or ""
+
+        if not self.email_provider.is_connected(self.business_id):
+            return self._UNBACKED_ACTION_TEMPLATES[
+                UnbackedActionCategory.OUT_OF_CHAT_MESSAGE
+            ].format(booking_link=booking_link)
+
+        if not lead.email:
+            return (
+                "I can send that over. What's the best email address "
+                "to send the summary to?"
+            )
+
+        working_memory = self.memory_manager.get_working_memory(conversation_id)
+        subject, body = self._compose_conversation_summary_email(lead, working_memory)
+
+        result = self.email_provider.send_email(
+            self.business_id, to=lead.email, subject=subject, body_text=body
+        )
+
+        if result.get("success"):
+            return f"Done -- I've sent a summary of our conversation to {lead.email}."
+
+        self.logger.error(
+            f"[EmailProvider] Failed to send conversation summary email "
+            f"(conversation_id={conversation_id}, business_id={self.business_id!r}): "
+            f"{result.get('error')}"
+        )
+        return (
+            "I tried to send that summary just now but hit a technical "
+            f"issue on my end. In the meantime, here's my calendar so we "
+            f"don't lose the thread: {booking_link}"
+        )
+
+    def _compose_conversation_summary_email(
+        self, lead: LeadProfile, working_memory: WorkingMemory
+    ) -> tuple[str, str]:
+        """
+        Build (subject, body) from data this conversation has already
+        genuinely collected -- WorkingMemory's summary/conversation_summary
+        and LeadProfile's fields -- never invented content. Returns plain
+        text; EmailProvider.send_email sends it as-is via MIMEText.
+        """
+        business_name = self.business_config.identity.business_name
+        subject = f"Your conversation summary from {business_name}"
+
+        lines = [f"Hi {lead.name}," if lead.name else "Hi,", ""]
+
+        narrative = working_memory.conversation_summary or working_memory.summary
+        if narrative:
+            lines.append(narrative)
+            lines.append("")
+
+        covered = []
+        if lead.company:
+            covered.append(f"Company: {lead.company}")
+        if lead.pain_points:
+            covered.append("Pain points: " + ", ".join(lead.pain_points))
+        if lead.goals:
+            covered.append("Goals: " + ", ".join(lead.goals))
+        if lead.budget:
+            covered.append(f"Budget: {lead.budget}")
+        if lead.timeline:
+            covered.append(f"Timeline: {lead.timeline}")
+        if covered:
+            lines.append("What we covered:")
+            lines.extend(covered)
+            lines.append("")
+
+        booking_link = self.business_config.persona.booking_link or ""
+        if booking_link:
+            lines.append(f"Book a time to continue: {booking_link}")
+
+        return subject, "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Classification

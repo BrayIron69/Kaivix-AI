@@ -18,14 +18,31 @@ def _compile_phrases(phrases: set[str]) -> list[re.Pattern]:
 
 class UnbackedActionCategory:
     """
-    A request for something this system has no real, deterministic way
-    to back. Values are also used as evals/run_conversation_evals.py
-    scenario-adjacent identifiers and log tags, so keep them stable.
+    A request Python must own the response to -- either because this
+    system has no real, deterministic way to back it (the first three
+    below), or because it does now, but only under conditions the LLM
+    must never be trusted to self-report (CONVERSATION_SUMMARY_EMAIL:
+    EmailProvider connected AND a real address on file -- see
+    ConversationEngine._maybe_decline_unbacked_action). Values are also
+    used as evals/run_conversation_evals.py scenario-adjacent
+    identifiers and log tags, so keep them stable.
     """
 
     OUT_OF_CHAT_MESSAGE = "out_of_chat_message"
     ALTERNATE_BOOKING_MECHANISM = "alternate_booking_mechanism"
     HUMAN_HANDOFF = "human_handoff"
+
+    # A visitor asking for an emailed recap of THIS conversation --
+    # narrowly scoped on purpose (see CONVERSATION_SUMMARY_EMAIL_PHRASES
+    # below): as of scheduling/email_provider.py, this is the one
+    # request in this file that can become genuinely backed at runtime
+    # (EmailProvider.is_connected() + a known lead.email), so it is
+    # handled separately from the three permanently-unbacked categories
+    # above rather than sharing their fixed decline template. A generic
+    # "send me a summary/guide/checklist" with no conversation-specific
+    # anchor stays OUT_OF_CHAT_MESSAGE -- there is no real document for
+    # those, and this category must never widen to cover them.
+    CONVERSATION_SUMMARY_EMAIL = "conversation_summary_email"
 
 
 class UnbackedActionDetector:
@@ -116,9 +133,40 @@ class UnbackedActionDetector:
         "is there a real person",
     }
 
+    # A visitor asking to have a recap of THIS conversation emailed to
+    # them. Every phrase is anchored to the conversation itself ("this
+    # conversation", "our conversation", "what we discussed", "what we
+    # talked about") -- deliberately excludes the bare "email me a
+    # summary" / "send me a summary" wording, which is exactly as likely
+    # to mean "summarize your services" or "summarize pricing" as it is
+    # to mean "recap this chat," and there is no real document behind
+    # the former. Also deliberately excludes "text me"/"sms me"/
+    # "whatsapp me" variants -- only email is real (EmailProvider), so a
+    # visitor asking for a text/SMS/WhatsApp recap must still fall
+    # through to OUT_OF_CHAT_MESSAGE and decline honestly.
+    CONVERSATION_SUMMARY_EMAIL_PHRASES = {
+        "email me a summary of this conversation", "email me the summary of this conversation",
+        "email me a summary of our conversation", "email me the summary of our conversation",
+        "email me a summary of what we discussed", "email me a summary of what we talked about",
+        "send me a summary of this conversation", "send me the summary of this conversation",
+        "send me a summary of our conversation", "send me the summary of our conversation",
+        "send me a summary of what we discussed", "send me a summary of what we talked about",
+        "email me a recap of this conversation", "email me a recap of our conversation",
+        "email me a recap of what we discussed", "email me a recap of what we talked about",
+        "send me a recap of this conversation", "send me a recap of our conversation",
+        "send me a recap of what we discussed", "send me a recap of what we talked about",
+        "email me what we discussed", "email me what we talked about",
+        "send me what we discussed", "send me what we talked about",
+        "email me a transcript of this conversation", "send me a transcript of this conversation",
+        "email me a copy of this conversation", "send me a copy of this conversation",
+        "email me this conversation", "send me this conversation",
+        "email me our conversation", "send me our conversation",
+    }
+
     _ALTERNATE_BOOKING_PATTERNS = _compile_phrases(ALTERNATE_BOOKING_MECHANISM_PHRASES)
     _OUT_OF_CHAT_PATTERNS = _compile_phrases(OUT_OF_CHAT_MESSAGE_PHRASES)
     _HUMAN_HANDOFF_PATTERNS = _compile_phrases(HUMAN_HANDOFF_PHRASES)
+    _CONVERSATION_SUMMARY_EMAIL_PATTERNS = _compile_phrases(CONVERSATION_SUMMARY_EMAIL_PHRASES)
 
     @staticmethod
     def _matches(patterns: list[re.Pattern], text: str) -> bool:
@@ -127,9 +175,18 @@ class UnbackedActionDetector:
     def detect(self, message: str) -> str | None:
         """
         Returns the matched UnbackedActionCategory, or None when the
-        message doesn't ask for anything in an unbacked category.
+        message doesn't ask for anything in one of these categories.
+
+        CONVERSATION_SUMMARY_EMAIL is checked first, same "more specific
+        category wins" precedent ALTERNATE_BOOKING_MECHANISM already
+        uses ahead of OUT_OF_CHAT_MESSAGE -- though by construction its
+        phrases don't currently overlap any other category's, checking
+        it first keeps that guarantee explicit rather than incidental.
         """
         lower = (message or "").lower()
+
+        if self._matches(self._CONVERSATION_SUMMARY_EMAIL_PATTERNS, lower):
+            return UnbackedActionCategory.CONVERSATION_SUMMARY_EMAIL
 
         if self._matches(self._ALTERNATE_BOOKING_PATTERNS, lower):
             return UnbackedActionCategory.ALTERNATE_BOOKING_MECHANISM
