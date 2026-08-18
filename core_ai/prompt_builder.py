@@ -47,14 +47,6 @@ Calendly demo link: https://calendly.com/brayiron-kaivixlab/30min
     # Universal engine rules — apply to every business, not config-driven.
     # Rule 3 is the one business-tunable knob (response length), filled in
     # from business_config.persona.response_style.max_sentences at build time.
-    #
-    # Rule 12 is a prompt-level ask, not a guarantee — the model can still
-    # ignore it. The actual guarantee for email/alternate-booking/human-
-    # handoff claims is core_ai/action_claim_gate.py, run by
-    # ConversationEngine._apply_action_claim_gate() on every response
-    # after generation, before it reaches a visitor. Rule 12 stays
-    # because catching a fabrication in the prompt (never generated at
-    # all) is strictly better than catching it after the fact.
     ENGINE_RULES = """
 RULES:
 1. Sound human and conversational — never robotic or scripted
