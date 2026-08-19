@@ -3,6 +3,16 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+# Imported for its side effect, and deliberately ABOVE the REDIRECT_URI
+# computation below: utils/env.py calls load_dotenv() at import time,
+# and this module reads the environment both at import time
+# (REDIRECT_URI / PUBLIC_BASE_URL) and at construction time
+# (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET). Importing it here is what
+# makes this module correct on its own, instead of depending on some
+# other module having been imported first -- see utils/env.py for the
+# real bug this prevents.
+import utils.env  # noqa: F401
+
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from scheduling.base_calendar_provider import BaseCalendarProvider
 from scheduling.calendar_token_store import CalendarTokenStore

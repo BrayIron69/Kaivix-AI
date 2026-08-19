@@ -4,6 +4,11 @@ import os
 import re
 from pathlib import Path
 
+# Imported for its side effect (load_dotenv at import time), so the
+# KAIVIX_LOG_CONVERSATION_BODIES read below is correct on a freshly
+# started server regardless of import order -- see utils/env.py.
+import utils.env  # noqa: F401
+
 # How much free text is kept from unbounded visitor-written fields. Long
 # enough to be recognisable in a log line, short enough to bound it.
 _FREE_TEXT_LIMIT = 60

@@ -17,6 +17,13 @@ import os
 import secrets
 from urllib.parse import quote
 
+# Imported for its side effect (load_dotenv at import time). This module
+# reads ADMIN_USERNAME / ADMIN_PASSWORD at request time and treats a
+# missing value as "deny", so without this a freshly started local
+# server would refuse every admin request until something unrelated
+# happened to trigger dotenv -- see utils/env.py.
+import utils.env  # noqa: F401
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials

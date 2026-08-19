@@ -1,7 +1,10 @@
-from dotenv import load_dotenv
 import os
 
-load_dotenv()
+# Imported for its side effect: utils/env.py calls load_dotenv() at
+# import time and is the single place that does so, so there is exactly
+# one env bootstrap in the app rather than one per entry point. The
+# values below are read at import time and need it to have already run.
+import utils.env  # noqa: F401
 
 
 class Config:

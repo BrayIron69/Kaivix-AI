@@ -4,6 +4,11 @@ from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from typing import Optional
 
+# Imported for its side effect (load_dotenv at import time), so this
+# module's GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET reads at construction
+# time are correct regardless of import order -- see utils/env.py.
+import utils.env  # noqa: F401
+
 from core_ai.business_config import DEFAULT_BUSINESS_ID
 from scheduling.calendar_token_store import CalendarTokenStore
 from scheduling.google_calendar_provider import GoogleCalendarProvider, _EXPIRY_REFRESH_MARGIN
