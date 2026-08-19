@@ -294,5 +294,99 @@ class TestConversationSummaryEmailTwentyRunDeterminism(_IsolatedDatabasesMixin, 
             self.assertIn("don't have a way to send", response)
 
 
+class TestConversationSummaryEmailNeverLeaksInternalState(
+    _IsolatedDatabasesMixin, unittest.TestCase
+):
+    """
+    Regression coverage for a bug found by real end-to-end verification,
+    not by any prior test: _compose_conversation_summary_email fell back
+    to working_memory.summary when conversation_summary hadn't been
+    produced yet, and working_memory.summary is the compact internal
+    state string built for the LLM's system prompt -- not customer-facing
+    text. A real visitor received an email whose entire body was
+    "Turn 2 | objective=qualification | temperature=Cold |
+    missing=company,budget,timeline".
+
+    The narrative paragraph is now omitted entirely when no human-readable
+    conversation_summary exists, rather than substituting the debug
+    string. This is the common case for a short conversation, since
+    set_conversation_summary() runs periodically rather than every turn.
+    """
+
+    def setUp(self):
+        self._isolate_databases()
+        self.engine = ConversationEngine()
+        self.engine.llm = MagicMock()
+        self.engine.llm.generate.side_effect = _ForbiddenLLMCall(
+            "LLM.generate() was called -- the summary-email path did "
+            "not short-circuit before generation."
+        )
+        self.engine.email_provider = MagicMock()
+        self.engine.email_provider.is_connected.return_value = True
+        self.engine.email_provider.send_email.return_value = {"success": True, "error": None}
+
+    def _sent_body(self, conversation_id: str) -> str:
+        self.engine.process_message(conversation_id, REQUEST_MESSAGE)
+        self.engine.email_provider.send_email.assert_called_once()
+        _args, kwargs = self.engine.email_provider.send_email.call_args
+        return kwargs["body_text"]
+
+    def test_internal_state_string_never_reaches_the_email_body(self):
+        conversation_id = "conv-summary-no-debug-leak"
+
+        lead = self.engine._update_lead_profile(
+            conversation_id, "my email is carol@example.com"
+        )
+        lead.update(email="carol@example.com")
+        self.engine._lead_profiles[conversation_id] = lead
+
+        # Exactly the real-world state that produced the bug: update()
+        # has populated the internal `summary` string, while the
+        # human-readable `conversation_summary` was never built.
+        working_memory = self.engine.memory_manager.get_working_memory(conversation_id)
+        working_memory.update(
+            qualification={"missing": ["company", "budget", "timeline"]}
+        )
+        self.assertTrue(
+            working_memory.summary,
+            "Precondition failed: this test is meaningless unless the "
+            "internal summary string is actually populated.",
+        )
+        self.assertFalse(working_memory.conversation_summary)
+
+        body = self._sent_body(conversation_id)
+
+        self.assertNotIn(working_memory.summary, body)
+        for debug_marker in ("objective=", "temperature=", "missing=", "Turn "):
+            self.assertNotIn(
+                debug_marker, body,
+                f"Internal state marker {debug_marker!r} leaked into a "
+                f"customer-facing email body:\n{body}",
+            )
+
+    def test_real_narrative_summary_is_still_included_when_it_exists(self):
+        """The fix must not suppress the genuine human-readable summary."""
+        conversation_id = "conv-summary-narrative-kept"
+
+        lead = self.engine._update_lead_profile(
+            conversation_id, "my email is dave@example.com"
+        )
+        lead.update(email="dave@example.com")
+        self.engine._lead_profiles[conversation_id] = lead
+
+        working_memory = self.engine.memory_manager.get_working_memory(conversation_id)
+        working_memory.update(qualification={"missing": ["budget"]})
+        working_memory.set_conversation_summary(
+            "Dave is evaluating an AI agent to handle after-hours enquiries."
+        )
+
+        body = self._sent_body(conversation_id)
+
+        self.assertIn(
+            "Dave is evaluating an AI agent to handle after-hours enquiries.", body
+        )
+        self.assertNotIn("objective=", body)
+
+
 if __name__ == "__main__":
     unittest.main()

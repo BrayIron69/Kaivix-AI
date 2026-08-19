@@ -531,7 +531,18 @@ class ConversationEngine:
 
         lines = [f"Hi {lead.name}," if lead.name else "Hi,", ""]
 
-        narrative = working_memory.conversation_summary or working_memory.summary
+        # working_memory.summary is deliberately excluded as a fallback
+        # here -- it is the compact, internal state string built for the
+        # LLM's own system prompt (see WorkingMemory's docstring), not
+        # customer-facing text, and a real send confirmed it reads like
+        # debug output ("Turn 2 | objective=qualification | ...") when
+        # used as an email body. conversation_summary is the only field
+        # meant for a human reader; when it hasn't been produced yet
+        # (set_conversation_summary() runs periodically, not every turn)
+        # the narrative paragraph is simply omitted -- the "What we
+        # covered" bullets and booking link below still make the email
+        # worth sending.
+        narrative = working_memory.conversation_summary
         if narrative:
             lines.append(narrative)
             lines.append("")

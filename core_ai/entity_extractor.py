@@ -182,10 +182,38 @@ class EntityExtractor:
         # -----------------------------
         # Name
         # -----------------------------
+        # NAME_PATTERNS capture up to three words after the lead-in
+        # phrase, which is right for "I'm Alice Smith" but over-captures
+        # everything else: "I'm interested in learning about..." yielded
+        # the name "Interested In Learning" (which reached a real
+        # visitor's inbox as "Hi Interested In Learning,"), and even a
+        # genuine name ran on into the rest of the sentence -- "I am Dana
+        # from WidgetCo" yielded "Dana From Widgetco".
+        #
+        # Matching stays case-insensitive so the lead-in phrase still
+        # matches however it was typed, but the captured group is a
+        # literal slice of `text` (never lowercased), so its real casing
+        # survives -- and only the *leading run of capitalized words* is
+        # kept. A real typed name is capitalized; the ordinary sentence
+        # words that follow it are not, so they stop the run.
+        #
+        # A visitor who types their name in all lowercase is not picked
+        # up here -- an under-extraction, not a fabrication, consistent
+        # with this extractor never inventing a value it isn't
+        # reasonably sure of.
         for pattern in self.NAME_PATTERNS:
             match = re.search(pattern, text, re.IGNORECASE)
-            if match:
-                state.name = match.group(1).strip().title()
+            if not match:
+                continue
+
+            name_words = []
+            for word in match.group(1).split():
+                if not word[:1].isupper():
+                    break
+                name_words.append(word)
+
+            if name_words:
+                state.name = " ".join(name_words).title()
                 break
 
         # -----------------------------
