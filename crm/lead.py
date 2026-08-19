@@ -45,6 +45,12 @@ class Lead:
 
     business_id: str = ""
 
+    # The stored conversation that produced this lead (most recent one --
+    # see crm/database.py's column comment). None/"" for leads captured
+    # before this column existed, and for any lead whose conversation has
+    # since been deleted from the admin dashboard.
+    conversation_id: str | None = None
+
     score_reasons: list[str] = field(default_factory=list)
 
     def __post_init__(self):
@@ -113,6 +119,7 @@ class Lead:
                 last_contacted=data.get("last_contacted"),
                 created_at=data.get("created_at"),
                 business_id=data.get("business_id", ""),
+                conversation_id=data.get("conversation_id"),
                 score_reasons=data.get("score_reasons", []) or [],
             )
 
@@ -205,5 +212,6 @@ class Lead:
             "last_contacted": _clean_text(self.last_contacted) or None,
             "created_at": _clean_text(self.created_at) or None,
             "business_id": _clean_text(self.business_id),
+            "conversation_id": _clean_text(self.conversation_id) or None,
             "score_reasons": list(self.score_reasons or []),
         }

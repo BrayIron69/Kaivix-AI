@@ -25,7 +25,10 @@ from urllib.parse import quote
 import utils.env  # noqa: F401
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from core_ai.business_config import DEFAULT_BUSINESS_ID
+from memory.conversation_memory import ConversationMemory
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from services.lead_service import LeadService
@@ -124,6 +127,7 @@ _DETAIL_FIELDS = [
     ("last_contacted", "Last contacted"),
     ("created_at", "Created at"),
     ("business_id", "Business ID"),
+    ("conversation_id", "Conversation ID"),
     ("id", "Record ID"),
 ]
 
@@ -190,6 +194,34 @@ dl { margin: 0; }
 dt { color: #6b7280; font-size: 13px; }
 dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
 .back { display: inline-block; margin-bottom: 18px; font-size: 14px; }
+h2 { font-size: 16px; margin: 28px 0 10px; letter-spacing: -0.01em; }
+.turn {
+  display: grid; grid-template-columns: 92px 1fr; gap: 14px;
+  padding: 12px 18px; border-bottom: 1px solid #eef0f3;
+}
+.turn:last-child { border-bottom: none; }
+.who {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; padding-top: 2px;
+}
+.who-visitor { color: #1e40af; }
+.who-agent { color: #047857; }
+/* Model text is arbitrary visitor/agent prose: preserve its line breaks
+   and force-wrap anything unbroken (a long URL) rather than letting it
+   stretch the card. */
+.say { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.danger {
+  margin-top: 28px; border: 1px solid #f3c9c9; border-radius: 10px;
+  background: #fffafa; padding: 16px 18px;
+}
+.danger h2 { margin: 0 0 4px; color: #991b1b; }
+.danger p { margin: 0 0 12px; font-size: 13px; color: #6b7280; }
+button.delete {
+  background: #b91c1c; color: #fff; border: 1px solid #991b1b;
+  padding: 9px 14px; font-size: 14px; font-weight: 600;
+  border-radius: 8px; cursor: pointer;
+}
+button.delete:hover { background: #991b1b; }
 """
 
 _SCRIPT = """
@@ -329,6 +361,81 @@ def _lead_to_dict(lead) -> dict:
     raise TypeError("Unsupported lead type.")
 
 
+def _load_transcript(lead: dict) -> list[dict]:
+    """
+    The stored conversation behind this lead, oldest message first.
+
+    Scoped by BOTH the lead's own business_id and its conversation_id --
+    never the dashboard's default business. ConversationMemory is
+    tenant-scoped at construction (business_id) and per-conversation at
+    query time (conversation_id), and both halves matter: conversation
+    ids are generated client-side (`'session_' + Math.random()...` in
+    chat_widget.html), so they are not globally unique by construction
+    and a collision across two businesses must not surface one tenant's
+    transcript on another's lead.
+
+    Returns [] when the lead predates the conversation_id column, when
+    its conversation has already been deleted, or if the store errors --
+    an admin page must still render the lead's fields even if the
+    transcript cannot be loaded.
+    """
+    conversation_id = _text(lead.get("conversation_id"))
+    if not conversation_id:
+        return []
+
+    business_id = _text(lead.get("business_id")) or DEFAULT_BUSINESS_ID
+
+    try:
+        memory = ConversationMemory(business_id=business_id)
+        return memory.get_conversation(conversation_id) or []
+    except Exception:
+        return []
+
+
+def _render_transcript(lead: dict, messages: list[dict]) -> str:
+    """Render the stored conversation, or an honest note about why not."""
+    conversation_id = _text(lead.get("conversation_id"))
+
+    if not conversation_id:
+        return (
+            "<h2>Conversation</h2>"
+            '<div class="card"><div class="empty">'
+            "No conversation is linked to this lead. Leads captured before "
+            "conversations were linked, or whose conversation has been "
+            "deleted, have no transcript to show."
+            "</div></div>"
+        )
+
+    if not messages:
+        return (
+            "<h2>Conversation</h2>"
+            '<div class="card"><div class="empty">'
+            f"No stored messages for conversation "
+            f"<strong>{_escape(conversation_id)}</strong>."
+            "</div></div>"
+        )
+
+    turns = []
+    for message in messages:
+        role = _text(message.get("role"))
+        # "assistant" is the stored role; the dashboard speaks about Bray
+        # and the visitor, not OpenAI-style role names.
+        is_agent = role == "assistant"
+        label = "Bray" if is_agent else "Visitor"
+        css = "who-agent" if is_agent else "who-visitor"
+
+        turns.append(
+            f'<div class="turn"><div class="who {css}">{_escape(label)}</div>'
+            f'<div class="say">{_escape(message.get("content"))}</div></div>'
+        )
+
+    count = len(messages)
+    return (
+        f"<h2>Conversation &middot; {count} message{'' if count == 1 else 's'}</h2>"
+        f'<div class="card">{"".join(turns)}</div>'
+    )
+
+
 def _render_row(lead: dict) -> str:
     detail_url = "/admin/leads/" + quote(_text(lead.get("email")), safe="")
 
@@ -450,11 +557,81 @@ def lead_detail(email: str):
 
     heading = _escape(data.get("name")) or _escape(data.get("email"))
 
+    transcript = _render_transcript(data, _load_transcript(data))
+
+    # POST, not a link: this deletes real customer data and must not be
+    # reachable by anything that follows GETs (a crawler, a prefetch, a
+    # pasted URL). The confirm() is a courtesy on top of that, not the
+    # protection itself.
+    delete_action = "/admin/leads/" + quote(_text(data.get("email")), safe="") + "/delete"
+    danger_zone = (
+        '<div class="danger">'
+        "<h2>Delete this lead</h2>"
+        "<p>Removes the CRM record and its stored conversation. "
+        "This cannot be undone.</p>"
+        f'<form method="post" action="{html.escape(delete_action)}" '
+        "onsubmit=\"return confirm('Permanently delete this lead and its "
+        "stored conversation? This cannot be undone.');\">"
+        '<button class="delete" type="submit">Delete lead and conversation</button>'
+        "</form>"
+        "</div>"
+    )
+
     body = (
         '<a class="back" href="/admin">&larr; All leads</a>'
         f"<h1>{heading}</h1>"
         f'<p class="sub">{_escape(data.get("email"))}</p>'
         f'<div class="card"><dl>{rows}</dl></div>'
+        f"{transcript}"
+        f"{danger_zone}"
     )
 
     return HTMLResponse(_page(f"{_text(data.get('email'))} — Kaivix Admin", body))
+
+
+@router.post("/leads/{email}/delete")
+def delete_lead(email: str):
+    """
+    Delete a lead's CRM record AND its stored conversation.
+
+    Both halves, deliberately: deleting only the CRM row would leave the
+    full transcript -- every word the visitor typed -- sitting in
+    memory/conversation_memory.db with nothing left pointing at it, which
+    is worse than not offering deletion at all. Someone asking for their
+    data to be removed means all of it.
+
+    Ordering matters. The conversation is deleted FIRST, because the lead
+    row holds the only pointer to it: if the lead were removed first and
+    the conversation delete then failed, the transcript would be
+    orphaned and unreachable from the dashboard, so a retry could never
+    find it. Doing it this way, a failure leaves the lead row intact and
+    the operation is safely repeatable.
+
+    Authentication is inherited from the router's own
+    dependencies=[Depends(require_admin)], the same credential guarding
+    every other admin route -- it is declared once on the router, so a
+    new route cannot accidentally ship unauthenticated.
+    """
+    lead = lead_service.get_by_email(email)
+
+    if lead is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead not found",
+        )
+
+    data = _lead_to_dict(lead)
+    conversation_id = _text(data.get("conversation_id"))
+    business_id = _text(data.get("business_id")) or DEFAULT_BUSINESS_ID
+
+    if conversation_id:
+        # Same (business_id, conversation_id) scoping the transcript view
+        # uses -- never a bare conversation_id, which is client-generated
+        # and not globally unique.
+        ConversationMemory(business_id=business_id).clear(conversation_id)
+
+    lead_service.delete(email, business_id=business_id)
+
+    # 303 so the browser follows with GET; a 307/308 would repeat the POST
+    # against /admin.
+    return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)

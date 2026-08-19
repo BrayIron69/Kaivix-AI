@@ -94,9 +94,10 @@ class SQLiteCRM(BaseCRM):
                     status,
                     notes,
                     last_contacted,
-                    business_id
+                    business_id,
+                    conversation_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     lead.get("name", ""),
@@ -115,6 +116,7 @@ class SQLiteCRM(BaseCRM):
                     lead.get("notes", ""),
                     lead.get("last_contacted"),
                     business_id,
+                    lead.get("conversation_id") or None,
                 ),
             )
 
@@ -204,6 +206,10 @@ class SQLiteCRM(BaseCRM):
             "status",
             "notes",
             "last_contacted",
+            # Overwritten on every sync, so the lead always points at the
+            # visitor's most recent conversation -- see the column comment
+            # in crm/database.py for why only one is tracked.
+            "conversation_id",
         ]
 
         fields = []

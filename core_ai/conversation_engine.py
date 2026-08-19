@@ -412,12 +412,24 @@ class ConversationEngine:
         Save the lead to the CRM when we have enough information
         to identify it uniquely. CRM failures are logged but never
         interrupt the conversation.
+
+        The conversation_id is recorded on the lead row so the admin
+        dashboard can show the real transcript behind the extracted
+        fields. It is attached to a plain dict copy rather than set on
+        the LeadProfile itself: LeadProfile describes the *person*
+        (CustomerState fields, hydrated from long-term memory across
+        sessions), while the conversation is a property of this one
+        session, and putting it on the profile would mean it flowed into
+        long-term memory hydration too.
         """
         if not lead.email or not lead.email.strip():
             return
 
+        payload = lead.to_dict()
+        payload["conversation_id"] = conversation_id
+
         try:
-            self.lead_service.save(lead, business_id=self.business_id)
+            self.lead_service.save(payload, business_id=self.business_id)
         except Exception as error:
             self.logger.error(
                 f"[LeadService] Failed to save lead "
