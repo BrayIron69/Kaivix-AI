@@ -70,13 +70,16 @@ from core_ai.prompt_builder import PromptBuilder  # noqa: E402
 from utils.exceptions import LLMUnavailableError  # noqa: E402
 from utils.llm import LLM  # noqa: E402
 
-# Reused directly from the unit test that guards KnowledgeBase's retrievable
-# content, so the eval's allowlist and the test's allowlist can never drift
-# apart -- there is exactly one definition of "the approved staff-cost
-# figures," not two independently maintained copies.
-from tests.test_pricing_knowledge_scoping import (  # noqa: E402
-    _ALLOWED_DOLLAR_FIGURES,
-    _DOLLAR_PATTERN,
+# The single definition of "which dollar figures are allowed", shared by
+# this eval, tests/test_pricing_knowledge_scoping.py, and the real
+# post-generation guard in ConversationEngine -- so the check that runs
+# in production and the check that runs here can never disagree.
+#
+# This used to be imported out of tests/, which meant a production rule
+# lived in the test suite; it now lives in core_ai/pricing_guard.py.
+from core_ai.pricing_guard import (  # noqa: E402
+    ALLOWED_DOLLAR_FIGURES as _ALLOWED_DOLLAR_FIGURES,
+    DOLLAR_PATTERN as _DOLLAR_PATTERN,
     strip_approved_shorthand_range,
 )
 

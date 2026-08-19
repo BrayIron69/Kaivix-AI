@@ -57,8 +57,11 @@ def get_connection():
             -- session and this column is overwritten on each sync, so
             -- earlier conversations remain in conversation_memory.db but
             -- are no longer reachable from the lead row. A full
-            -- lead-to-conversations history would need its own join
-            -- table; this single column is deliberately the smaller step.
+            -- Holds the MOST RECENT conversation for this lead. The full
+            -- history now lives in the lead_conversations join table
+            -- below; this column is kept because it is what the list and
+            -- detail views show as "latest", and dropping it would mean
+            -- a query for something already recorded here.
             conversation_id TEXT,
 
             UNIQUE(business_id, email)
@@ -94,6 +97,39 @@ def get_connection():
                 ADD COLUMN {column} {column_type}
                 """
             )
+
+    # Every conversation a lead has ever had, not just the most recent
+    # one. leads.conversation_id is overwritten on each sync, so before
+    # this table a returning visitor's earlier conversations stayed in
+    # memory/conversation_memory.db with nothing pointing at them --
+    # invisible in the admin dashboard and, worse, missed by a delete
+    # that only cleared the one conversation the lead still named.
+    #
+    # Keyed by (business_id, email) to match how a lead is identified
+    # everywhere else in this schema and in LeadService/SQLiteCRM
+    # (get_lead_by_email / delete_lead), rather than by leads.id, so a
+    # link survives a lead row being rewritten.
+    #
+    # first_seen orders the history; the PRIMARY KEY makes re-linking the
+    # same conversation on every turn a no-op via INSERT OR IGNORE.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lead_conversations (
+            business_id TEXT NOT NULL,
+            email TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+            PRIMARY KEY (business_id, email, conversation_id)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_lead_conversations_lead
+        ON lead_conversations (business_id, email)
+        """
+    )
 
     conn.commit()
     return conn

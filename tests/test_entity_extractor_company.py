@@ -80,12 +80,14 @@ class TestCompanyExtractionStopsAtClauseBoundaries(unittest.TestCase):
             "we run a clinic in downtown Boston serving 200 patients weekly",
             "I run a bakery so I need something simple and cheap to run",
         ]
+        widest_cap = max(EntityExtractor._COMPANY_MAX_WORDS.values())
+
         for message in messages:
             with self.subTest(message=message):
                 company = self._company_for(message)
                 self.assertLessEqual(
                     len(company.split()),
-                    EntityExtractor._COMPANY_MAX_WORDS,
+                    widest_cap,
                     f"Sentence-shaped company extracted: {company!r}",
                 )
                 for verb_phrase in (" and need", " and want", " but we", " so i"):
@@ -115,6 +117,23 @@ class TestRealCompanyNamesStillExtract(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertEqual(self._company_for(message), expected)
 
+    def test_a_stated_name_is_not_cut_on_descriptive_words(self):
+        """
+        The descriptive-continuation boundary applies to business-TYPE
+        captures only. A visitor stating a proper name that happens to
+        contain one of those words must keep it.
+        """
+        cases = [
+            ("my company is Made in Chelsea", "Made in Chelsea"),
+            (
+                "my company is The Law Offices of Smith and Associates LLP",
+                "The Law Offices of Smith and Associates LLP",
+            ),
+        ]
+        for message, expected in cases:
+            with self.subTest(message=message):
+                self.assertEqual(self._company_for(message), expected)
+
     def test_ordinary_answers_still_extract(self):
         cases = [
             ("my company is Acme Co", "Acme Co"),
@@ -127,39 +146,31 @@ class TestRealCompanyNamesStillExtract(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertEqual(self._company_for(message), expected)
 
-    def test_a_sentence_length_run_on_is_rejected_not_truncated(self):
+    def test_run_ons_with_no_conjunction_stop_at_the_description(self):
         """
-        The word cap is a backstop for phrasings the clause boundaries do
-        not anticipate -- a long run-on with no conjunction at all.
-        Taking nothing is correct: an arbitrary mid-phrase truncation
-        would store something the visitor never said.
+        Closes a gap this file previously documented as open: a run-on
+        with no conjunction ("a clinic in downtown Boston serving 200
+        patients weekly") is 8 words and slipped under the single shared
+        word cap of 8.
+
+        Business-type captures now also stop at a descriptive
+        continuation, which is better than the rejection a tighter cap
+        alone would have produced -- the useful part ("clinic") is kept
+        rather than the whole value discarded.
         """
-        message = (
-            "we run a clinic in downtown Boston serving over 200 patients every week"
-        )
-
-        self.assertEqual(self._company_for(message), "")
-
-    def test_the_word_cap_is_generous_and_does_not_catch_everything(self):
-        """
-        Documents the real limit rather than overclaiming. The cap is set
-        high enough for genuine long names ("The Law Offices of Smith and
-        Associates LLP" is 7 words), so a run-on that stays under it and
-        contains no clause boundary still gets through. Clause
-        boundaries, not this cap, are the actual fix for the reported
-        bug; this test exists so the gap is visible rather than assumed
-        closed.
-        """
-        message = "we run a clinic in downtown Boston serving 200 patients weekly"
-
-        company = self._company_for(message)
-
-        self.assertEqual(
-            company, "clinic in downtown Boston serving 200 patients weekly"
-        )
-        self.assertLessEqual(
-            len(company.split()), EntityExtractor._COMPANY_MAX_WORDS
-        )
+        cases = [
+            ("we run a clinic in downtown Boston serving 200 patients weekly", "clinic"),
+            (
+                "we run a clinic in downtown Boston serving over 200 patients every week",
+                "clinic",
+            ),
+            ("I own a bakery based in Leeds", "bakery"),
+            ("we run a gym near the station", "gym"),
+            ("we own a garage located on the high street", "garage"),
+        ]
+        for message, expected in cases:
+            with self.subTest(message=message):
+                self.assertEqual(self._company_for(message), expected)
 
 
 if __name__ == "__main__":

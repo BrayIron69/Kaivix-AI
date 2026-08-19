@@ -15,6 +15,8 @@ from core_ai.goal_engine import GoalEngine
 from core_ai.lead_intelligence_engine import LeadIntelligenceEngine
 from core_ai.memory_manager import MemoryManager
 from core_ai.planning_engine import PlanningEngine
+from core_ai.pricing_guard import PRICE_DEFLECTION_RESPONSE, find_unapproved_figures
+from crm.lead_conversations import LeadConversationLinks
 from core_ai.prompt_builder import PromptBuilder
 from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
@@ -137,6 +139,10 @@ class ConversationEngine:
         self.lead_service = LeadService(
             crm_provider=self.business_config.providers.crm_provider
         )
+        # Full lead-to-conversations history, alongside the single
+        # latest conversation leads.conversation_id holds -- see
+        # crm/lead_conversations.py.
+        self.lead_conversation_links = LeadConversationLinks()
         self.calendar_provider = GoogleCalendarProvider()
         # Reuses the same Google connection calendar_provider does --
         # see scheduling/email_provider.py's docstring. Not gated by
@@ -321,6 +327,17 @@ class ConversationEngine:
         # ever sees one. See core_ai/em_dash_filter.py.
         response = strip_em_dashes(response)
 
+        # Deterministic backstop for ENGINE_RULES rule #7 / pricing.md's
+        # "never invent a price". Same reasoning as the em-dash filter
+        # above and as Decision #030's action gate: the prompt rule is an
+        # instruction the model can decline, and a 150-run soak measured
+        # it declining ~2.7% of the time by quoting figures that exist
+        # nowhere in the knowledge base ("$5,000 and $15,000", "$500-$800
+        # per month"). Applied before the response is stored or returned,
+        # so neither the visitor nor the conversation history ever
+        # contains an invented price. See core_ai/pricing_guard.py.
+        response = self._guard_against_invented_price(conversation_id, response)
+
         self.memory.add_assistant_message(conversation_id, response)
 
         self._log_turn(
@@ -428,6 +445,21 @@ class ConversationEngine:
         payload = lead.to_dict()
         payload["conversation_id"] = conversation_id
 
+        # Record this conversation in the lead's full history as well as
+        # in leads.conversation_id (which only ever holds the latest).
+        # Kept in its own try so a link failure cannot stop the lead
+        # itself being saved -- the lead is the more important record,
+        # and the link is recoverable on the next turn.
+        try:
+            self.lead_conversation_links.link(
+                lead.email, conversation_id, business_id=self.business_id
+            )
+        except Exception as error:
+            self.logger.error(
+                f"[LeadConversationLinks] Failed to link conversation to lead "
+                f"(conversation_id={conversation_id}): {error}"
+            )
+
         try:
             self.lead_service.save(payload, business_id=self.business_id)
         except Exception as error:
@@ -435,6 +467,40 @@ class ConversationEngine:
                 f"[LeadService] Failed to save lead "
                 f"(conversation_id={conversation_id}): {error}"
             )
+
+    # ------------------------------------------------------------------
+    # Invented pricing
+    # ------------------------------------------------------------------
+
+    def _guard_against_invented_price(self, conversation_id: str, response: str) -> str:
+        """
+        Replace any response quoting a dollar figure Bray is not allowed
+        to say, and log loudly that it happened.
+
+        Returns `response` unchanged when it is clean -- which is the
+        overwhelmingly common case, so a normal pricing conversation
+        (shape, not numbers, per pricing.md's policy) is untouched.
+
+        The whole response is replaced rather than the figures redacted:
+        removing the numbers leaves the sentence around them still
+        asserting that a specific price exists, which is the same false
+        claim with the digits filed off.
+
+        Logged at error level with the offending figures because this
+        firing means the model attempted to quote an invented price to a
+        real visitor. It is caught, but it is not routine, and it is the
+        only signal that would show the rate moving.
+        """
+        unapproved = find_unapproved_figures(response)
+        if not unapproved:
+            return response
+
+        self.logger.error(
+            f"[PricingGuard] Blocked an invented price before it reached the "
+            f"visitor (conversation_id={conversation_id}, "
+            f"business_id={self.business_id!r}): figures={unapproved}"
+        )
+        return PRICE_DEFLECTION_RESPONSE
 
     # ------------------------------------------------------------------
     # Unbacked action requests

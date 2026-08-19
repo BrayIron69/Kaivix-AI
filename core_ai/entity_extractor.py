@@ -32,22 +32,58 @@ class EntityExtractor:
         r"\bthis is\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})",
     ]
 
+    # (pattern, kind). The two kinds capture genuinely different things
+    # and need different bounds, which is why one shared word cap left a
+    # gap:
+    #
+    #   NAME       -- "my company is X", "I work at X". The visitor is
+    #                 stating a proper name, which can legitimately be
+    #                 long ("The Law Offices of Smith and Associates
+    #                 LLP" is 7 words).
+    #   DESCRIPTOR -- "we run a X", "I own a X". The visitor is
+    #                 describing a business TYPE. Real answers are short
+    #                 noun phrases ("dental clinic", "small law firm"),
+    #                 and this is where run-on sentences actually arrive,
+    #                 because the phrasing invites a narrative answer.
+    #
+    # Bounding them separately means the descriptor case can be held to a
+    # tight limit without truncating a genuinely long stated name.
+    _COMPANY_KIND_NAME = "name"
+    _COMPANY_KIND_DESCRIPTOR = "descriptor"
+
     COMPANY_PATTERNS = [
-        r"\bmy company is\s+([^.,!?]+)",
-        r"\bour company is\s+([^.,!?]+)",
-        r"\bcompany is\s+([^.,!?]+)",
+        (r"\bmy company is\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bour company is\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bcompany is\s+([^.,!?]+)", _COMPANY_KIND_NAME),
 
-        r"\bi run\s+(?:a|an|the)?\s*([^.,!?]+)",
-        r"\bi own\s+(?:a|an|the)?\s*([^.,!?]+)",
+        (r"\bi run\s+(?:a|an|the)?\s*([^.,!?]+)", _COMPANY_KIND_DESCRIPTOR),
+        (r"\bi own\s+(?:a|an|the)?\s*([^.,!?]+)", _COMPANY_KIND_DESCRIPTOR),
 
-        r"\bwe run\s+(?:a|an|the)?\s*([^.,!?]+)",
-        r"\bwe own\s+(?:a|an|the)?\s*([^.,!?]+)",
+        (r"\bwe run\s+(?:a|an|the)?\s*([^.,!?]+)", _COMPANY_KIND_DESCRIPTOR),
+        (r"\bwe own\s+(?:a|an|the)?\s*([^.,!?]+)", _COMPANY_KIND_DESCRIPTOR),
 
-        r"\bi work at\s+([^.,!?]+)",
-        r"\bwe work at\s+([^.,!?]+)",
+        (r"\bi work at\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bwe work at\s+([^.,!?]+)", _COMPANY_KIND_NAME),
 
-        r"\bmy business is\s+([^.,!?]+)",
+        (r"\bmy business is\s+([^.,!?]+)", _COMPANY_KIND_NAME),
     ]
+
+    # Descriptive continuations that only ever follow a business type,
+    # never form part of one: "a clinic IN downtown Boston", "a clinic
+    # SERVING 200 patients". Applied to DESCRIPTOR captures only, so a
+    # stated name is never cut on them -- "Made in Chelsea" survives
+    # "my company is Made in Chelsea", and would only be clipped by
+    # "we run Made in Chelsea", which is both rare and still yields the
+    # recognisable "Made".
+    #
+    # This is what turns the run-on into a useful value rather than a
+    # rejection: "we run a clinic in downtown Boston serving 200 patients
+    # weekly" now extracts "clinic" instead of being discarded whole.
+    _COMPANY_DESCRIPTOR_STOP_PATTERN = re.compile(
+        r"\b(?:in|near|around|serving|offering|providing|specialising"
+        r"|specializing|based|located|doing|handling|focused|focusing)\b",
+        re.IGNORECASE,
+    )
 
     # Where a captured company value has to stop.
     #
@@ -103,14 +139,24 @@ class EntityExtractor:
         re.IGNORECASE,
     )
 
-    # Belt-and-braces cap for a phrasing the clause boundaries above do
-    # not anticipate (a long run-on with no conjunction at all, e.g.
-    # "we run a clinic in downtown Boston serving 200 patients weekly").
-    # Deliberately generous -- "The Law Offices of Smith and Associates
-    # LLP" is 7 words -- so it only rejects values no real company name
-    # reaches. Rejecting outright rather than truncating: an arbitrary
-    # mid-phrase cut would store something the visitor never said.
-    _COMPANY_MAX_WORDS = 8
+    # Word caps, as a last backstop for a phrasing none of the
+    # boundaries above anticipate. Rejecting outright rather than
+    # truncating: an arbitrary mid-phrase cut would store something the
+    # visitor never said.
+    #
+    # A single shared cap used to sit at 8 to accommodate long stated
+    # names, which left the descriptor case unguarded -- "clinic in
+    # downtown Boston serving 200 patients weekly" is exactly 8 words and
+    # slipped straight through. Splitting the cap by kind closes that
+    # without clipping real names.
+    _COMPANY_MAX_WORDS = {
+        # "The Law Offices of Smith and Associates LLP" is 7.
+        _COMPANY_KIND_NAME: 8,
+        # Real answers here are 1-3 words ("dental clinic", "small law
+        # firm"); 5 leaves room for "Smith and Sons Plumbing" arriving
+        # via "we run ...".
+        _COMPANY_KIND_DESCRIPTOR: 5,
+    }
 
     ROLE_PATTERNS = [
         r"\b(founder|owner|ceo|director|manager|doctor|dentist|lawyer|principal|president)\b",
@@ -282,7 +328,7 @@ class EntityExtractor:
         # -----------------------------
         # Company
         # -----------------------------
-        for pattern in self.COMPANY_PATTERNS:
+        for pattern, kind in self.COMPANY_PATTERNS:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 company = match.group(1).strip()
@@ -292,16 +338,25 @@ class EntityExtractor:
                 # part of the company name -- see _COMPANY_STOP_PATTERN.
                 company = self._COMPANY_STOP_PATTERN.split(company, maxsplit=1)[0]
 
+                # A business TYPE additionally stops at a descriptive
+                # continuation ("clinic IN downtown Boston", "clinic
+                # SERVING 200 patients"). Not applied to a stated name,
+                # where those words can legitimately be part of it.
+                if kind == self._COMPANY_KIND_DESCRIPTOR:
+                    company = self._COMPANY_DESCRIPTOR_STOP_PATTERN.split(
+                        company, maxsplit=1
+                    )[0]
+
                 company = company.strip().rstrip(".,!? ")
 
                 if len(company) < 2:
                     continue
 
-                # Still sentence-shaped despite the boundaries above:
+                # Still sentence-shaped despite every boundary above:
                 # take nothing rather than record a sentence as a company
                 # (an under-extraction, not a fabrication -- the same
                 # stance NAME_PATTERNS takes).
-                if len(company.split()) > self._COMPANY_MAX_WORDS:
+                if len(company.split()) > self._COMPANY_MAX_WORDS[kind]:
                     continue
 
                 state.company = company

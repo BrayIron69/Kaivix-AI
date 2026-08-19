@@ -1,44 +1,24 @@
-import re
 import unittest
 from pathlib import Path
 
 from knowledge.knowledge_base import KnowledgeBase
 
-# The only dollar figures Bray is allowed to have access to: the generic
-# staff-cost comparison in pricing.md's policy section (explicitly approved
-# to be spoken aloud, once a visitor has engaged with cost/ROI). Every other
-# dollar figure (Kaivix's own setup fees, retainers, founding client rate)
-# must be structurally absent from anything KnowledgeBase can retrieve.
-_ALLOWED_DOLLAR_FIGURES = {"$1,500", "$3,000"}
-
-_DOLLAR_PATTERN = re.compile(r"\$[\d,]*\d")
-
-# The LLM sometimes paraphrases the approved comparison as an abbreviated
-# range ("$1.5-3 K", "$1.5‑$3K") instead of the exact figures above.
-# _DOLLAR_PATTERN can't match a decimal or a "K" magnitude suffix at all
-# (it only matches digits/commas), so "$1.5-3 K" makes it find a bare
-# "$1" -- not in _ALLOWED_DOLLAR_FIGURES, so it gets misreported as a
-# leaked figure. Scoped tightly to the literal 1.5/3 values of this one
-# approved comparison, not a general decimal-K pattern, so a genuinely
-# different figure (e.g. "$2.5K", "$4-5 K") is never matched here and
-# still reaches _DOLLAR_PATTERN as an unapproved figure. Covers common
-# dash variants (hyphen, non-breaking hyphen, en/em dash) since LLM
-# output favors non-ASCII punctuation.
-_APPROVED_SHORTHAND_RANGE_PATTERN = re.compile(
-    r"\$1\.5\s*[-‐‑‒–—]\s*\$?3(?:,000)?\s*[kK]\b"
+# The definition of "which dollar figures are allowed" now lives in
+# production code (core_ai/pricing_guard.py), because a real
+# post-generation guard enforces it on every response Bray sends -- not
+# just this test and the eval. It used to live here, with
+# evals/run_conversation_evals.py importing it out of tests/, which put
+# a production rule inside the test suite.
+#
+# Re-exported under the original private names so this module's own
+# tests, and anything else that imported them from here, keep working
+# against the same single definition.
+from core_ai.pricing_guard import (  # noqa: F401
+    ALLOWED_DOLLAR_FIGURES as _ALLOWED_DOLLAR_FIGURES,
+    APPROVED_SHORTHAND_RANGE_PATTERN as _APPROVED_SHORTHAND_RANGE_PATTERN,
+    DOLLAR_PATTERN as _DOLLAR_PATTERN,
+    strip_approved_shorthand_range,
 )
-
-
-def strip_approved_shorthand_range(text: str) -> str:
-    """
-    Remove any occurrence of the approved staff-cost comparison written
-    as an abbreviated range, before scanning for dollar figures -- so a
-    caller's _DOLLAR_PATTERN scan never sees the "$1" fragment inside
-    "$1.5-3 K" and misreports it as an unapproved figure. Does not
-    affect the exact "$1,500"/"$3,000" phrasing, which was already
-    handled correctly by _ALLOWED_DOLLAR_FIGURES.
-    """
-    return _APPROVED_SHORTHAND_RANGE_PATTERN.sub("", text)
 
 
 class TestPricingKnowledgeScoping(unittest.TestCase):

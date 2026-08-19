@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from core_ai.business_config import DEFAULT_BUSINESS_ID
+from crm.lead_conversations import LeadConversationLinks
 from memory.conversation_memory import ConversationMemory
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -88,6 +89,7 @@ router = APIRouter(
 )
 
 lead_service = LeadService()
+lead_conversation_links = LeadConversationLinks()
 
 
 # --------------------------------------------------
@@ -361,25 +363,49 @@ def _lead_to_dict(lead) -> dict:
     raise TypeError("Unsupported lead type.")
 
 
-def _load_transcript(lead: dict) -> list[dict]:
+def _conversation_ids_for(lead: dict) -> list[str]:
     """
-    The stored conversation behind this lead, oldest message first.
+    Every conversation this lead has had, oldest first.
 
-    Scoped by BOTH the lead's own business_id and its conversation_id --
+    Falls back to leads.conversation_id when the join table has no rows
+    for this lead -- which is every lead captured before the table
+    existed. Without that fallback, historic leads would appear to have
+    no conversation at all even though one is still stored.
+    """
+    email = _text(lead.get("email"))
+    business_id = _text(lead.get("business_id")) or DEFAULT_BUSINESS_ID
+
+    try:
+        linked = lead_conversation_links.conversation_ids_for(
+            email, business_id=business_id
+        )
+    except Exception:
+        linked = []
+
+    if linked:
+        return linked
+
+    latest = _text(lead.get("conversation_id"))
+    return [latest] if latest else []
+
+
+def _load_transcript(lead: dict, conversation_id: str) -> list[dict]:
+    """
+    One stored conversation, oldest message first.
+
+    Scoped by BOTH the lead's own business_id and the conversation_id --
     never the dashboard's default business. ConversationMemory is
     tenant-scoped at construction (business_id) and per-conversation at
-    query time (conversation_id), and both halves matter: conversation
-    ids are generated client-side (`'session_' + Math.random()...` in
-    chat_widget.html), so they are not globally unique by construction
-    and a collision across two businesses must not surface one tenant's
-    transcript on another's lead.
+    query time, and both halves matter: conversation ids are generated
+    client-side (`'session_' + Math.random()...` in chat_widget.html),
+    so they are not globally unique by construction and a collision
+    across two businesses must not surface one tenant's transcript on
+    another's lead.
 
-    Returns [] when the lead predates the conversation_id column, when
-    its conversation has already been deleted, or if the store errors --
-    an admin page must still render the lead's fields even if the
-    transcript cannot be loaded.
+    Returns [] when the conversation has already been deleted or the
+    store errors -- an admin page must still render the lead's fields
+    even if a transcript cannot be loaded.
     """
-    conversation_id = _text(lead.get("conversation_id"))
     if not conversation_id:
         return []
 
@@ -392,26 +418,25 @@ def _load_transcript(lead: dict) -> list[dict]:
         return []
 
 
-def _render_transcript(lead: dict, messages: list[dict]) -> str:
-    """Render the stored conversation, or an honest note about why not."""
-    conversation_id = _text(lead.get("conversation_id"))
+def _render_one_transcript(
+    conversation_id: str, messages: list[dict], position: int, total: int
+) -> str:
+    """One conversation's messages, with a heading identifying which."""
+    # Numbered only when there is more than one, so the common
+    # single-conversation lead reads as it did before.
+    which = f"Conversation {position} of {total}" if total > 1 else "Conversation"
 
-    if not conversation_id:
+    def heading(suffix: str = "") -> str:
         return (
-            "<h2>Conversation</h2>"
-            '<div class="card"><div class="empty">'
-            "No conversation is linked to this lead. Leads captured before "
-            "conversations were linked, or whose conversation has been "
-            "deleted, have no transcript to show."
-            "</div></div>"
+            f"<h2>{which}{suffix} &middot; "
+            f'<span class="muted">{_escape(conversation_id)}</span></h2>'
         )
 
     if not messages:
         return (
-            "<h2>Conversation</h2>"
+            f"{heading()}"
             '<div class="card"><div class="empty">'
-            f"No stored messages for conversation "
-            f"<strong>{_escape(conversation_id)}</strong>."
+            "No stored messages for this conversation."
             "</div></div>"
         )
 
@@ -431,8 +456,37 @@ def _render_transcript(lead: dict, messages: list[dict]) -> str:
 
     count = len(messages)
     return (
-        f"<h2>Conversation &middot; {count} message{'' if count == 1 else 's'}</h2>"
+        f"{heading(f' &middot; {count} message' + ('' if count == 1 else 's'))}"
         f'<div class="card">{"".join(turns)}</div>'
+    )
+
+
+def _render_transcripts(lead: dict) -> str:
+    """
+    Every conversation this lead has had, oldest first, or an honest note
+    about why there are none.
+    """
+    conversation_ids = _conversation_ids_for(lead)
+
+    if not conversation_ids:
+        return (
+            "<h2>Conversation</h2>"
+            '<div class="card"><div class="empty">'
+            "No conversation is linked to this lead. Leads captured before "
+            "conversations were linked, or whose conversations have been "
+            "deleted, have no transcript to show."
+            "</div></div>"
+        )
+
+    total = len(conversation_ids)
+    return "".join(
+        _render_one_transcript(
+            conversation_id,
+            _load_transcript(lead, conversation_id),
+            position,
+            total,
+        )
+        for position, conversation_id in enumerate(conversation_ids, start=1)
     )
 
 
@@ -557,7 +611,7 @@ def lead_detail(email: str):
 
     heading = _escape(data.get("name")) or _escape(data.get("email"))
 
-    transcript = _render_transcript(data, _load_transcript(data))
+    transcript = _render_transcripts(data)
 
     # POST, not a link: this deletes real customer data and must not be
     # reachable by anything that follows GETs (a crawler, a prefetch, a
@@ -592,20 +646,25 @@ def lead_detail(email: str):
 @router.post("/leads/{email}/delete")
 def delete_lead(email: str):
     """
-    Delete a lead's CRM record AND its stored conversation.
+    Delete a lead's CRM record AND every conversation it has had.
 
-    Both halves, deliberately: deleting only the CRM row would leave the
-    full transcript -- every word the visitor typed -- sitting in
-    memory/conversation_memory.db with nothing left pointing at it, which
-    is worse than not offering deletion at all. Someone asking for their
-    data to be removed means all of it.
+    All of it, deliberately: deleting only the CRM row would leave the
+    full transcripts -- every word the visitor typed -- sitting in
+    memory/conversation_memory.db with nothing left pointing at them,
+    which is worse than not offering deletion at all. Someone asking for
+    their data to be removed means all of it.
 
-    Ordering matters. The conversation is deleted FIRST, because the lead
-    row holds the only pointer to it: if the lead were removed first and
-    the conversation delete then failed, the transcript would be
-    orphaned and unreachable from the dashboard, so a retry could never
-    find it. Doing it this way, a failure leaves the lead row intact and
-    the operation is safely repeatable.
+    "Every conversation", not just the latest. leads.conversation_id
+    holds only the most recent one, so a returning visitor's earlier
+    transcripts used to survive this delete entirely -- the exact gap
+    crm/lead_conversations.py exists to close.
+
+    Ordering matters. Conversation content is deleted FIRST, then the
+    links, then the lead, because each step holds the pointer the
+    previous one needs: if the lead went first and a later step failed,
+    the transcripts would be orphaned beyond any retry's reach. This way
+    a failure leaves the pointers intact and the operation is safely
+    repeatable.
 
     Authentication is inherited from the router's own
     dependencies=[Depends(require_admin)], the same credential guarding
@@ -621,15 +680,16 @@ def delete_lead(email: str):
         )
 
     data = _lead_to_dict(lead)
-    conversation_id = _text(data.get("conversation_id"))
     business_id = _text(data.get("business_id")) or DEFAULT_BUSINESS_ID
 
-    if conversation_id:
-        # Same (business_id, conversation_id) scoping the transcript view
-        # uses -- never a bare conversation_id, which is client-generated
-        # and not globally unique.
-        ConversationMemory(business_id=business_id).clear(conversation_id)
+    # Same (business_id, conversation_id) scoping the transcript view
+    # uses -- never a bare conversation_id, which is client-generated and
+    # not globally unique.
+    memory = ConversationMemory(business_id=business_id)
+    for conversation_id in _conversation_ids_for(data):
+        memory.clear(conversation_id)
 
+    lead_conversation_links.delete_for(email, business_id=business_id)
     lead_service.delete(email, business_id=business_id)
 
     # 303 so the browser follows with GET; a 307/308 would repeat the POST
