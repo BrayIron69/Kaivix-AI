@@ -45,20 +45,57 @@ a scenario x run summary table.
 
 ## Token budget — read this before trusting a FAIL
 
-A full pass is **~27 real LLM calls at ~2,600 tokens each, so ~70,000
-tokens**. Groq's on-demand tier enforces two separate token limits, measured
-2026-07-30 on `llama-3.3-70b-versatile`:
+**A full pass now fits comfortably inside the limits.** Measured
+2026-08-19 on `openai/gpt-oss-120b` (the current model), across two
+complete back-to-back passes:
 
-| Limit | Value | Behaviour |
+| Measured | Pass A | Pass B |
 |---|---|---|
-| Tokens per minute (TPM) | 12,000 | Refills continuously. A full pass is ~5x this, so it **will** be hit. |
-| Tokens per day (TPD) | 100,000 | Rolling ~24h window. A full pass is ~70% of it. |
+| Real LLM calls | 24 | 24 |
+| Total tokens | 58,656 | 63,019 |
+| Mean / median tokens per call | 2,444 / 2,890 | 2,626 / 2,903 |
+| Wall clock | 28.9s | 32.2s |
+| `429` responses | **0** | **0** |
 
-The runner handles these differently, because they need opposite responses.
-A TPM block is waited out (short constant retry). A TPD block cannot be
-waited out inside a run, so the first call that exhausts its retries marks
-the provider hard-blocked and every remaining call fails immediately instead
-of re-waiting.
+The limits themselves, read from Groq's own `x-ratelimit-*` response
+headers on the same date and account:
+
+| Limit | Value | Notes |
+|---|---|---|
+| Tokens per minute (TPM) | **250,000** | Continuous refill. A whole pass lands inside one minute and uses ~25% of it. |
+| Requests per day (RPD) | **500,000** | A pass is 24 requests, i.e. 0.005% of it. |
+| Tokens per day (TPD) | **no such limit** | Groq exposes no daily *token* header for this model/account. The previously recorded 100,000 TPD cap no longer applies. |
+
+The header units are not guessed — they are confirmed by the reset
+values: `x-ratelimit-reset-requests: 172ms` after one request matches
+86400s ÷ 500,000 = 172.8ms (so requests are **per day**), and
+`x-ratelimit-reset-tokens: 17ms` after 73 tokens matches
+73 × 60s ÷ 250,000 = 17.5ms (so tokens are **per minute**).
+
+### What changed, and why the old numbers are gone
+
+The previous figures (12,000 TPM / 100,000 TPD, a pass being ~5x the
+per-minute budget and ~70% of the daily one) were measured on
+`llama-3.3-70b-versatile`. That model now returns **HTTP 404** — it was
+decommissioned, which is what forced the migration to
+`openai/gpt-oss-120b`. Those numbers therefore cannot be re-measured and
+should not be carried forward: the per-minute budget is ~20x larger and
+the daily token cap is gone entirely.
+
+**This closes the "eval suite is unrunnable on the free tier" known
+issue.** A full pass completes in about half a minute without ever being
+rate-limited.
+
+### The pacing logic is retained anyway
+
+`with_rate_limit_retry` in the runner never fires under the current
+limits, and is deliberately kept regardless. It costs nothing when no
+`429` occurs, and it is the only thing standing between a limit change
+(a different account, a tier change, a future model) and a run that
+reports provider refusals as engine failures. A `429` is still waited
+out on a short constant retry; if one call exhausts every attempt, the
+provider is refusing on a sustained basis, so the remaining calls fail
+immediately rather than each re-waiting the full budget.
 
 **A `no_crash` FAIL is therefore ambiguous on its own**: it means either the
 engine genuinely raised, or the provider refused. Read the transcript — a
@@ -71,18 +108,53 @@ prevent.
 Note that `429` is all this tool can see. The 429 *body* is what names the
 limit, the amount used, and the reset time — and `utils/llm.py` discards it
 deliberately (Decision #021: provider error text can quote part of an API
-key). To get the real numbers, call the API directly and print the error
-body; the runner tells you this when it detects a hard block.
+key).
 
-Use `--runs N` to shrink a pass when the budget is tight:
+To re-measure the limits, you do **not** need to provoke a 429: Groq
+returns them on every successful response. One minimal call is enough,
+and this is how the numbers in this section were obtained:
+
+```bash
+curl -sD - -o /dev/null https://api.groq.com/openai/v1/chat/completions \
+  -H "Authorization: Bearer $GROQ_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"hi"}],"max_tokens":1}' \
+  | grep -i x-ratelimit
+```
+
+Use `--runs N` for a faster pass (the token budget is no longer the
+constraint it once was):
 
 ```bash
 python evals/run_conversation_evals.py --runs 1
 ```
 
-That is ~9 calls / ~23,000 tokens. Fewer runs is a weaker signal against LLM
-non-determinism, not a different check — a failure at `--runs 1` is still a
-real failure.
+That is ~8 calls / ~21,000 tokens, derived from the measured 3-run pass
+above. Fewer runs is a weaker signal against LLM non-determinism, not a
+different check — a failure at `--runs 1` is still a real failure.
+
+## Known flake: `just_tell_me_the_price`
+
+Observed 2026-08-19: across two consecutive full passes (6 runs of this
+scenario), `no_price_leak` failed **once** and passed the other five
+times. The first pass reported `OVERALL: FAIL` on that single run; the
+second reported `OVERALL: PASS` with no code change in between.
+
+This is exactly the LLM non-determinism this suite exists to surface, and
+it is a real signal, not noise to be dismissed — the check guards the
+specific bug that already shipped once. Treat a `no_price_leak` failure
+here as genuine and worth reading the transcript for, even when a re-run
+passes.
+
+## Windows note
+
+The runner prints model output straight to stdout, and the current model
+emits characters (e.g. `‑`, a non-breaking hyphen) that the Windows
+default `cp1252` console codec cannot encode — which crashes the run
+mid-pass with `UnicodeEncodeError`. Force UTF-8 output:
+
+```bash
+PYTHONIOENCODING=utf-8 python evals/run_conversation_evals.py
+```
 
 ## Checks
 

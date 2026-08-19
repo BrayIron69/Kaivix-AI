@@ -51,33 +51,41 @@ RUNS_PER_SCENARIO = 3
 # Rate-limit pacing
 # ----------------------------------------------------------------------
 #
-# Groq's on-demand tier enforces TWO token limits, and they need opposite
-# responses. Measured on llama-3.3-70b-versatile, 2026-07-30:
+# CURRENT STATE (measured 2026-08-19 on openai/gpt-oss-120b, from Groq's
+# own x-ratelimit-* response headers plus two complete instrumented
+# passes -- see evals/README.md's "Token budget" section):
 #
-#   tokens per minute (TPM): 12,000, continuously refilling
-#   tokens per day   (TPD): 100,000, rolling ~24h window
+#   tokens per minute (TPM):  250,000, continuously refilling
+#   requests per day (RPD):   500,000
+#   tokens per day:           no such limit is exposed for this model
 #
-# One eval turn costs ~2,600 tokens (the whole system prompt, including up
-# to three knowledge documents). So a 3-run pass is ~27 calls / ~70,000
-# tokens: comfortably inside TPD when the day is fresh, but ~5x the
-# per-minute budget, meaning TPM WILL be hit and is worth waiting out.
+# A full 3-run pass is 24 calls / ~59,000-63,000 tokens, completes in
+# ~30 seconds, and hits ZERO 429s -- roughly 25% of a single minute's
+# token budget. None of the pacing below currently fires.
 #
-# TPD is the opposite: waiting cannot help within a run, and the response
-# says so (`x-should-retry: false`, `retry-after` in the tens of minutes).
+# HISTORY: the previous figures here (12,000 TPM / 100,000 TPD, a pass
+# being ~5x the per-minute budget) were measured on
+# llama-3.3-70b-versatile, which now returns HTTP 404 -- it was
+# decommissioned, forcing the migration to the current model. Those
+# numbers cannot be re-measured and no longer describe anything real.
 #
-# Only the 429 *body* distinguishes them, and utils/llm.py deliberately
-# discards it -- Decision #021, because provider error text can quote part
-# of an API key. That is the right call for production and it is why a TPD
-# block has previously been recorded here only as "quota blocked", with no
-# numbers: `reason` and `status_code` cannot tell the two apart.
+# WHY THIS IS KEPT ANYWAY: it costs nothing while no 429 occurs, and it
+# is the only thing preventing a limit change (different account, tier
+# change, future model) from being silently reported as engine failures.
+# A 429 is retried on a short constant wait. If one call exhausts every
+# attempt, the provider is refusing on a sustained basis -- treat it as a
+# hard block and fail the remaining calls IMMEDIATELY rather than
+# re-waiting the full budget for each, which would otherwise spend
+# attempts x backoff on all 24 calls to learn what the first already
+# established.
 #
-# So this harness infers it from behaviour instead. A 429 is retried on a
-# short constant wait, which is all TPM needs. But if one call exhausts
-# every attempt, the provider is refusing sustained -- treat it as a hard
-# block and fail the remaining calls IMMEDIATELY rather than re-waiting the
-# full budget for each. Without that, a TPD-blocked run spends
-# attempts x backoff on all ~27 calls (over an hour) to learn what the
-# first call already established.
+# Note that only the 429 *body* would name which limit was hit, and
+# utils/llm.py deliberately discards it (Decision #021: provider error
+# text can quote part of an API key). That is the right call for
+# production, and it is why this harness infers a sustained block from
+# behaviour rather than reading the reason. The limits themselves are
+# readable without a 429 at all, from the x-ratelimit-* headers on any
+# successful response -- see evals/README.md.
 #
 # A constant wait rather than exponential backoff: the TPM limiter is a
 # steadily refilling bucket with a single client, so there is no contention
@@ -127,15 +135,22 @@ def with_rate_limit_retry(generate):
                         f"{_RATE_LIMIT_MAX_ATTEMPTS} attempts "
                         f"({_RATE_LIMIT_MAX_ATTEMPTS * _RATE_LIMIT_BACKOFF_SECONDS}s "
                         f"of waiting). This is a sustained block, not "
-                        f"per-minute pacing -- most likely the daily token "
-                        f"budget. Remaining calls will fail immediately "
-                        f"rather than wait. Check the exact limit with:\n"
-                        f"      curl -s -w '%{{http_code}}' "
+                        f"per-minute pacing. Remaining calls will fail "
+                        f"immediately rather than wait.\n"
+                        f"    Note this is unexpected under the limits "
+                        f"measured 2026-08-19 (250,000 TPM, no daily token "
+                        f"cap), where a full pass uses ~25% of one minute's "
+                        f"budget -- so the account, tier, or model limits "
+                        f"have most likely changed. Read the real current "
+                        f"limits from any SUCCESSFUL response's headers, no "
+                        f"429 needed:\n"
+                        f"      curl -sD - -o /dev/null "
                         f"https://api.groq.com/openai/v1/chat/completions "
-                        f"-H \"Authorization: Bearer $GROQ_API_KEY\" ...\n"
-                        f"    -- the 429 body names the limit, used, and "
-                        f"reset time; this tool never sees it (Decision "
-                        f"#021).",
+                        f"-H \"Authorization: Bearer $GROQ_API_KEY\" "
+                        f"-H 'Content-Type: application/json' -d '...' "
+                        f"| grep -i x-ratelimit\n"
+                        f"    -- and update evals/README.md's Token budget "
+                        f"section with what you find.",
                         flush=True,
                     )
                     raise
@@ -639,11 +654,12 @@ def main() -> int:
         metavar="N",
         help=(
             "Runs per scenario (default: %(default)s). Lower this for a "
-            "faster pass when the provider's per-minute token budget is the "
-            "bottleneck -- 3 runs is ~24 large calls and the pacing waits "
-            "can make a full pass take tens of minutes. Fewer runs is a "
-            "weaker signal against LLM non-determinism, not a different "
-            "check: a failure at --runs 1 is still a real failure."
+            "faster pass -- 3 runs is 24 real calls / ~60,000 tokens and "
+            "takes about 30 seconds (measured 2026-08-19; the per-minute "
+            "token budget is no longer the bottleneck it was on the "
+            "previous model). Fewer runs is a weaker signal against LLM "
+            "non-determinism, not a different check: a failure at "
+            "--runs 1 is still a real failure."
         ),
     )
     args = parser.parse_args()
