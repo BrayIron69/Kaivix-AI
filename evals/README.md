@@ -132,29 +132,59 @@ That is ~8 calls / ~21,000 tokens, derived from the measured 3-run pass
 above. Fewer runs is a weaker signal against LLM non-determinism, not a
 different check — a failure at `--runs 1` is still a real failure.
 
-## Known flake: `just_tell_me_the_price`
+## One unexplained failure, 2026-08-19 — and what it changed
 
-Observed 2026-08-19: across two consecutive full passes (6 runs of this
-scenario), `no_price_leak` failed **once** and passed the other five
-times. The first pass reported `OVERALL: FAIL` on that single run; the
-second reported `OVERALL: PASS` with no code change in between.
+A full pass reported `OVERALL: FAIL` on `just_tell_me_the_price`. The
+next pass reported `OVERALL: PASS` with no code change in between, and
+**44 further runs of that scenario were clean** (20 direct, 24 through
+the runner's own `run_scenario`). At a 1-in-6 rate, zero failures in 44
+runs has probability ~0.03%, so whatever happened is much rarer than
+that single observation suggested — or was not a price leak at all.
 
-This is exactly the LLM non-determinism this suite exists to surface, and
-it is a real signal, not noise to be dismissed — the check guards the
-specific bug that already shipped once. Treat a `no_price_leak` failure
-here as genuine and worth reading the transcript for, even when a re-run
-passes.
+**The cause could not be recovered**, and that is the real finding. The
+scenario declares only `no_price_leak`, but `RunResult.hard_check_passed`
+fails a run on `turn.crashed` first, so an engine exception — including
+a provider blip, which is *not* an engine defect — produced exactly the
+same `FAIL` cell as a genuine price leak. The transcript that would have
+said which had already scrolled past.
 
-## Windows note
+Two changes came out of this:
+
+- The summary table now prints a **`WHY EACH FAILURE FAILED`** block
+  naming the cause of every failed run (`CRASH: ...` with the exception,
+  or `failed: <check names>`). The next occurrence diagnoses itself.
+- The Windows `UnicodeEncodeError` crash below was found in the same
+  session and is fixed, since it could take down a pass mid-run and
+  destroy exactly this kind of evidence.
+
+Do **not** treat the original observation as dismissed. `no_price_leak`
+guards the specific bug that already shipped to real visitors, so a
+failure here is worth reading the transcript for even when a re-run
+passes — there is now a reason line telling you whether it was a leak or
+a crash.
+
+## Windows console encoding — fixed, no workaround needed
 
 The runner prints model output straight to stdout, and the current model
-emits characters (e.g. `‑`, a non-breaking hyphen) that the Windows
-default `cp1252` console codec cannot encode — which crashes the run
-mid-pass with `UnicodeEncodeError`. Force UTF-8 output:
+emits characters the Windows default `cp1252` console codec cannot
+encode (`‑` U+2011 non-breaking hyphen was the one that hit, plus em
+dashes and curly quotes). That raised `UnicodeEncodeError` from the
+transcript printer and **killed the run mid-pass** — after the real API
+calls had already been paid for, and before any summary table was
+printed.
+
+The runner now reconfigures `stdout`/`stderr` to UTF-8 at import
+(`_force_utf8_console`, with `errors="replace"` as a fallback), so no
+`PYTHONIOENCODING` is needed:
 
 ```bash
-PYTHONIOENCODING=utf-8 python evals/run_conversation_evals.py
+python evals/run_conversation_evals.py
 ```
+
+Covered by `tests/test_eval_runner_console_encoding.py`, which asserts
+the precondition too — that a plain `print` of the offending character
+under `cp1252` genuinely still crashes — so the test cannot quietly stop
+protecting anything.
 
 ## Checks
 

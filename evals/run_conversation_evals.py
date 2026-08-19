@@ -28,6 +28,41 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
+
+def _force_utf8_console() -> None:
+    """
+    Make stdout/stderr able to print whatever the model emitted.
+
+    This tool's entire output is model text, and the model emits
+    characters outside the Windows default console codec (cp1252) --
+    e.g. U+2011 NON-BREAKING HYPHEN, U+2014 EM DASH, curly quotes. On
+    Windows that raised UnicodeEncodeError from the plain `print` in
+    print_scenario_transcripts and killed the whole run mid-pass, after
+    the real API calls had already been paid for and with no summary
+    table printed. Losing a completed eval to a console codec is the
+    worst possible failure mode for a tool whose only job is reporting
+    what the model said.
+
+    Reconfiguring to UTF-8 is the fix. `errors="replace"` is the belt-
+    and-braces fallback: if some environment cannot do UTF-8 at all, an
+    unencodable character degrades to a replacement mark rather than
+    taking the run down. Guarded with hasattr because sys.stdout is not
+    always a TextIOWrapper (pytest's capture object, for one, has no
+    reconfigure).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                # Already-detached or otherwise unreconfigurable stream.
+                # Not worth failing the run over -- worst case we are back
+                # to the platform default, which is what we had before.
+                pass
+
+
+_force_utf8_console()
+
 from config import Config  # noqa: E402
 from core_ai.conversation_engine import ConversationEngine  # noqa: E402
 from core_ai.conversation_plan import ConversationPlan  # noqa: E402
@@ -433,6 +468,39 @@ class RunResult:
     conversation_id: str
     turns: list[TurnResult]
 
+    def failure_reason(self) -> str | None:
+        """
+        Why this run failed, or None if it passed.
+
+        Exists because the summary table previously printed an identical
+        "FAIL" whether the engine raised or a text check tripped, and the
+        two demand completely different responses -- a crash is often a
+        provider blip (see the rate-limit note above), while a
+        no_price_leak failure is the exact class of bug that already
+        shipped once. Diagnosing which required scrolling back through a
+        full pass of transcripts, and a real occurrence was lost that way
+        during the 2026-08-19 token re-measurement: the pass reported
+        FAIL, the run was not reproducible afterwards (44 subsequent runs
+        of that scenario were clean), and the cause could no longer be
+        recovered.
+
+        Reported as short text so the summary row carries the reason with
+        it and the next occurrence is self-diagnosing.
+        """
+        for turn in self.turns:
+            if turn.crashed:
+                return f"CRASH: {turn.error}"
+
+            failed = sorted(
+                name
+                for name, passed in turn.check_results.items()
+                if name in _HARD_CHECKS and not passed
+            )
+            if failed:
+                return "failed: " + ", ".join(failed)
+
+        return None
+
     def hard_check_passed(self) -> bool:
         for turn in self.turns:
             if turn.crashed:
@@ -621,13 +689,43 @@ def print_summary_table(all_results: dict[str, list[RunResult]]) -> bool:
     print(header)
 
     overall_pass = True
+    # (scenario, run number, reason) for every failed run, printed under
+    # the table so a FAIL says what actually went wrong without anyone
+    # having to scroll back through a full pass of transcripts.
+    failures: list[tuple[str, int, str]] = []
+
     for scenario_name, run_results in all_results.items():
         row = f"{scenario_name:<32}"
-        for run in run_results:
+        for run_number, run in enumerate(run_results, start=1):
             passed = run.hard_check_passed()
             overall_pass = overall_pass and passed
             row += f"{'PASS' if passed else 'FAIL':<9}"
+
+            if not passed:
+                failures.append(
+                    (
+                        scenario_name,
+                        run_number,
+                        run.failure_reason() or "unknown",
+                    )
+                )
         print(row)
+
+    if failures:
+        print()
+        print("-" * 78)
+        print("WHY EACH FAILURE FAILED")
+        print("-" * 78)
+        for scenario_name, run_number, reason in failures:
+            print(f"  {scenario_name} run{run_number}: {reason}")
+        print()
+        print(
+            "  A CRASH is often the provider refusing (see the rate-limit\n"
+            "  note in this file / evals/README.md), NOT an engine defect --\n"
+            "  and it is not evidence the scenario's other checks passed\n"
+            "  either. A failed text check is a real conversational finding:\n"
+            "  read that run's transcript above."
+        )
 
     print()
     print(f"OVERALL: {'PASS' if overall_pass else 'FAIL'}")
