@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 import crm.database as crm_database
+import memory.conversation_store as conversation_store_module
 import memory.long_term_memory as ltm_module
 from core_ai.conversation_engine import ConversationEngine
 from core_ai.conversation_plan import ConversationPlan
@@ -34,6 +35,13 @@ class _IsolatedDatabasesMixin:
     """Same isolation pattern as tests/test_conversation_engine_booking.py."""
 
     def _isolate_databases(self):
+        # All THREE stores a real ConversationEngine writes to, not just
+        # the first two. Isolating only CRM and long-term memory left
+        # memory/conversation_memory.db pointed at the real file, so every
+        # process_message() turn in this file wrote real rows into it --
+        # invisible here because nothing in this file asserts on stored
+        # conversation history. Matches the complete pattern
+        # tests/test_multi_business_serving.py already uses.
         fd, crm_db_path = tempfile.mkstemp(suffix=".db")
         os.close(fd)
         os.remove(crm_db_path)
@@ -42,16 +50,23 @@ class _IsolatedDatabasesMixin:
         os.close(fd)
         os.remove(ltm_db_path)
 
+        fd, conv_db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.remove(conv_db_path)
+
         original_crm_db_name = crm_database.DATABASE_NAME
         original_ltm_db_path = ltm_module.SQLiteLongTermMemoryStore.DB_PATH
+        original_conv_db_path = conversation_store_module.SQLiteConversationStore.DB_PATH
 
         crm_database.DATABASE_NAME = crm_db_path
         ltm_module.SQLiteLongTermMemoryStore.DB_PATH = ltm_db_path
+        conversation_store_module.SQLiteConversationStore.DB_PATH = conv_db_path
 
         def _restore():
             crm_database.DATABASE_NAME = original_crm_db_name
             ltm_module.SQLiteLongTermMemoryStore.DB_PATH = original_ltm_db_path
-            for path in (crm_db_path, ltm_db_path):
+            conversation_store_module.SQLiteConversationStore.DB_PATH = original_conv_db_path
+            for path in (crm_db_path, ltm_db_path, conv_db_path):
                 if os.path.exists(path):
                     os.remove(path)
 

@@ -31,8 +31,18 @@ import groq
 from api.handlers.exceptions import LLM_UNAVAILABLE_MESSAGE
 from api.main import app
 from api.routers import chat as chat_router_module
+from core_ai.conversation_engine import ConversationEngine
+from services.chat_service import ChatService
 from utils.exceptions import LLMUnavailableError
 from utils.llm import LLM
+
+# Reused rather than copied: this is the one _IsolatedDatabasesMixin that
+# already isolates all three stores a real ConversationEngine writes to
+# (CRM, long-term memory, AND conversation memory). Importing it keeps a
+# single definition instead of an eighth near-identical copy, the same
+# cross-file reuse tests/test_chat_business_auth.py already does with
+# _MultiBusinessMixin.
+from tests.test_multi_business_serving import _IsolatedDatabasesMixin
 
 
 # Deliberately does NOT use Groq's real "gsk_" key prefix: this string is
@@ -218,21 +228,49 @@ class TestSecretsNeverReachTheLog(unittest.TestCase):
         self.assertNotIn(SENTINEL_API_KEY, str(caught.exception))
 
 
-class TestChatEndpointDegradesGracefully(unittest.TestCase):
+class TestChatEndpointDegradesGracefully(_IsolatedDatabasesMixin, unittest.TestCase):
     """
     End-to-end through the real engine: an LLMUnavailableError raised at the
     LLM layer has to travel up through ConversationEngine (which logs and
     re-raises it) and be turned into a 503 by the centrally registered
     handler.
+
+    These tests drive the real POST /chat route, so they need the engine
+    behind it to be a throwaway rather than the process-wide singleton.
+    Previously they reached straight into
+    chat_router_module.chat_service.engine and mutated the real one, which
+    meant every request here wrote real rows into the real
+    memory/conversation_memory.db (conv_503, conv_503_msg, conv_retry,
+    conv_shape, conv_ok). That is a different failure from the missing
+    third temp-file swap the engine-level test files had -- no amount of
+    DB isolation helps if the route resolves to a singleton built before
+    the isolation was applied -- so it takes the singleton-swap fix
+    tests/test_multi_business_serving.py established, on top of the
+    isolation.
     """
 
     def setUp(self):
-        self.client = TestClient(app)
-        self.engine = chat_router_module.chat_service.engine
-        self.original_generate = self.engine.llm.generate
+        # Isolation FIRST. ConversationEngine binds
+        # SQLiteConversationStore's DB_PATH at CONSTRUCTION time (see
+        # memory/conversation_store.py's __init__), so the swap has to be
+        # in place before any engine is built -- including the one
+        # self.service.engine builds below.
+        self._isolate_databases()
 
-    def tearDown(self):
-        self.engine.llm.generate = self.original_generate
+        self.service = ChatService(
+            engine_factory=lambda business_id: ConversationEngine(business_id=business_id)
+        )
+
+        original_service = chat_router_module.chat_service
+        chat_router_module.chat_service = self.service
+        self.addCleanup(
+            lambda: setattr(chat_router_module, "chat_service", original_service)
+        )
+
+        self.client = TestClient(app)
+        # A per-test engine now, not the shared singleton -- so there is
+        # nothing to restore afterwards; it is discarded with the test.
+        self.engine = self.service.engine
 
     def _make_llm_unavailable(self):
         def _raise(messages):
