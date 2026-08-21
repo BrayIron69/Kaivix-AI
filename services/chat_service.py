@@ -77,12 +77,21 @@ class ChatService:
         conversation_id: str,
         message: str,
         business_id: str = DEFAULT_BUSINESS_ID,
+        channel: str = "chat",
     ) -> str:
         """
         business_id defaults to DEFAULT_BUSINESS_ID, so the original
         two-argument call signature keeps working unchanged.
+
+        channel defaults to "chat" for the same reason -- api/routers/
+        chat.py never passes it, so the widget's traffic is byte-
+        identical to before. api/routers/voice.py is the one caller that
+        passes channel="voice", threaded straight through to
+        ConversationEngine.process_message (see its docstring for what
+        this actually changes).
         """
         return self.get_engine(business_id).process_message(
             conversation_id=conversation_id,
             user_message=message,
+            channel=channel,
         )

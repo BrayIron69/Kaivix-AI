@@ -48,6 +48,10 @@ BUSINESS_B_IDENTITY = (
 BUSINESS_B_KNOWLEDGE = (
     "Ridgeline Dental accepts Delta Dental and opens late on Thursdays."
 )
+# Distinct from Kaivix's real booking_link for the same reason as
+# BUSINESS_B_IDENTITY/BUSINESS_B_KNOWLEDGE above, so a test asserting
+# isolation has a real, different value to check against.
+BUSINESS_B_BOOKING_LINK = "https://calendly.com/ridgeline-dental/cleaning"
 
 
 class _IsolatedDatabasesMixin:
@@ -124,9 +128,21 @@ class _MultiBusinessMixin(_IsolatedDatabasesMixin):
         # the left side when namespace is absolute -- so an absolute temp path
         # works as a namespace here.
         self.business_b_config = SimpleNamespace(
+            # Added alongside persona.booking_link below when the voice
+            # integration's channel-aware URL guard started reading both
+            # unconditionally on every voice-channel turn (see
+            # ConversationEngine._response_contains_a_url /
+            # _voice_booking_alternative) -- a real BusinessConfig always
+            # has both (BusinessIdentity.business_name and
+            # BusinessPersona.booking_link are non-optional /
+            # Optional[str] fields on the pydantic models in
+            # core_ai/business_config.py), so this fixture was simply
+            # incomplete, not something the guard should special-case.
+            identity=SimpleNamespace(business_name="Ridgeline Dental"),
             persona=SimpleNamespace(
                 identity_statement=BUSINESS_B_IDENTITY,
                 response_style=SimpleNamespace(max_sentences=2),
+                booking_link=BUSINESS_B_BOOKING_LINK,
             ),
             qualification=SimpleNamespace(
                 fields=[

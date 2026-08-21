@@ -74,14 +74,33 @@ class TestUnbackedActionShortCircuit(_IsolatedDatabasesMixin, unittest.TestCase)
         self.assertNotIn("I can email you", response.lower())
         self.assertNotIn("i'll email", response.lower())
 
+    def _expected_chat_decline(self, category) -> str:
+        """
+        The exact chat-channel decline text: template prefix + ": " +
+        the real booking_link, matching what
+        ConversationEngine._maybe_decline_unbacked_action builds for
+        channel="chat" (the default). Built this way, rather than via
+        `_UNBACKED_ACTION_TEMPLATES[category].format(booking_link=...)`,
+        because the templates no longer contain a `{booking_link}`
+        placeholder at all -- the voice-integration channel split
+        (see conversation_engine.py) moved that formatting out of the
+        template string and into the caller, so chat stays
+        byte-identical while voice never states a URL. A `.format()`
+        call against a template with no matching placeholder silently
+        no-ops instead of raising, which is what let this test drift out
+        of sync with production without failing loudly -- reconstructing
+        the same concatenation the production code actually performs is
+        what keeps this test meaningful.
+        """
+        booking_link = self.engine.business_config.persona.booking_link
+        return f"{ConversationEngine._UNBACKED_ACTION_TEMPLATES[category]}: {booking_link}"
+
     def test_out_of_chat_message_response_matches_the_fixed_template(self):
         response = self.engine.process_message(
             "conv-unbacked-2", "can you text me a summary?"
         )
 
-        expected = ConversationEngine._UNBACKED_ACTION_TEMPLATES[
-            UnbackedActionCategory.OUT_OF_CHAT_MESSAGE
-        ].format(booking_link=self.engine.business_config.persona.booking_link)
+        expected = self._expected_chat_decline(UnbackedActionCategory.OUT_OF_CHAT_MESSAGE)
         self.assertEqual(response, expected)
         self.engine.llm.generate.assert_not_called()
 
@@ -90,9 +109,9 @@ class TestUnbackedActionShortCircuit(_IsolatedDatabasesMixin, unittest.TestCase)
             "conv-unbacked-3", "can you email me the available times"
         )
 
-        expected = ConversationEngine._UNBACKED_ACTION_TEMPLATES[
+        expected = self._expected_chat_decline(
             UnbackedActionCategory.ALTERNATE_BOOKING_MECHANISM
-        ].format(booking_link=self.engine.business_config.persona.booking_link)
+        )
         self.assertEqual(response, expected)
         self.engine.llm.generate.assert_not_called()
 
@@ -101,9 +120,7 @@ class TestUnbackedActionShortCircuit(_IsolatedDatabasesMixin, unittest.TestCase)
             "conv-unbacked-4", "can I talk to a real person"
         )
 
-        expected = ConversationEngine._UNBACKED_ACTION_TEMPLATES[
-            UnbackedActionCategory.HUMAN_HANDOFF
-        ].format(booking_link=self.engine.business_config.persona.booking_link)
+        expected = self._expected_chat_decline(UnbackedActionCategory.HUMAN_HANDOFF)
         self.assertEqual(response, expected)
         self.engine.llm.generate.assert_not_called()
 

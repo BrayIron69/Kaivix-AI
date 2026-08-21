@@ -114,6 +114,117 @@ class TestPromptBuilderBookingSections(unittest.TestCase):
         self.assertNotIn("BOOKING SYSTEM ERROR", output)
 
 
+class TestBookingSystemErrorIsChannelAware(unittest.TestCase):
+    """
+    A caller on a phone cannot see or click a link. This is the
+    prompt-level half of that fix -- the first line of defense, not the
+    guarantee (see ConversationEngine._guard_against_spoken_url for the
+    deterministic backstop this instruction alone is not trusted to be).
+    """
+
+    def _build(self, channel: str) -> str:
+        plan = ConversationPlan(strategy="drive_to_booking", booking_failed=True)
+        return PromptBuilder().build(
+            stage="closing",
+            intent="buying_signal",
+            goal="book_demo",
+            knowledge="",
+            plan=plan,
+            channel=channel,
+        )
+
+    @staticmethod
+    def _booking_system_error_section(output: str) -> str:
+        """
+        Just the BOOKING SYSTEM ERROR section's own instruction text, not
+        the whole prompt.
+
+        The base prompt legitimately contains the raw Calendly link
+        elsewhere, as background context for the model in general (see
+        prompt_builder.py's "Calendly demo link:" line) -- that is not
+        itself a problem, since a system prompt is never read aloud to
+        anyone; the risk this fix closes is the model's GENERATED
+        RESPONSE containing a URL, and that is what
+        ConversationEngine._guard_against_spoken_url actually guards
+        (deliberately covering that baked-in reference too, without this
+        section needing to). The claim this test file makes is narrower
+        and more precise: the instruction THIS section adds must not be
+        the one telling the model to say the link.
+        """
+        start = output.index("BOOKING SYSTEM ERROR:")
+        end = output.index("\n\nRULES:")
+        return output[start:end]
+
+    def test_default_channel_is_chat_and_unchanged(self):
+        """
+        No `channel` argument at all -- every existing caller of
+        PromptBuilder.build before this change. Must produce the exact
+        same output test_booking_failed_is_narrated_with_calendly_fallback
+        already asserts on.
+        """
+        output = PromptBuilder().build(
+            stage="closing",
+            intent="buying_signal",
+            goal="book_demo",
+            knowledge="",
+            plan=ConversationPlan(strategy="drive_to_booking", booking_failed=True),
+        )
+
+        self.assertIn("calendly.com", output)
+
+    def test_chat_channel_explicit_still_offers_the_real_link(self):
+        output = self._build(channel="chat")
+
+        self.assertIn("BOOKING SYSTEM ERROR", output)
+        self.assertIn("calendly.com", output)
+
+    def test_voice_channel_instruction_never_tells_the_model_to_say_the_link(self):
+        section = self._booking_system_error_section(self._build(channel="voice"))
+
+        self.assertNotIn("calendly.com", section)
+        self.assertNotIn("http://", section)
+        self.assertNotIn("https://", section)
+
+    def test_chat_channel_instruction_does_tell_the_model_to_say_the_link(self):
+        """
+        The contrast that proves this is actually channel-conditional,
+        not just "the link was removed". Chat still gets exactly the
+        original instruction.
+        """
+        section = self._booking_system_error_section(self._build(channel="chat"))
+
+        self.assertIn("calendly.com", section)
+
+    def test_voice_channel_instruction_says_never_say_a_url(self):
+        section = self._booking_system_error_section(self._build(channel="voice")).lower()
+
+        self.assertIn("never", section)
+        self.assertIn("url", section)
+        self.assertIn("phone call", section)
+
+    def test_voice_channel_instruction_offers_email_as_the_real_alternative(self):
+        section = self._booking_system_error_section(self._build(channel="voice"))
+
+        self.assertIn("email", section.lower())
+
+    def test_voice_channel_with_no_booking_failure_is_unaffected(self):
+        """channel="voice" must not change anything when the BOOKING
+        SYSTEM ERROR section isn't triggered at all this turn."""
+        plan = ConversationPlan(strategy="drive_to_booking")
+
+        voice_output = PromptBuilder().build(
+            stage="closing", intent="buying_signal", goal="book_demo",
+            knowledge="", plan=plan, channel="voice",
+        )
+        chat_output = PromptBuilder().build(
+            stage="closing", intent="buying_signal", goal="book_demo",
+            knowledge="", plan=plan, channel="chat",
+        )
+
+        self.assertEqual(voice_output, chat_output)
+        self.assertNotIn("BOOKING SYSTEM ERROR", voice_output)
+
+
 class TestEngineRulesBookingHallucinationGuard(unittest.TestCase):
     """
     Guards the fix for the false-booking-confirmation gap: rule #8 alone

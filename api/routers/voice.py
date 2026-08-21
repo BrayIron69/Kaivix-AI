@@ -157,6 +157,12 @@ def voice_chat_completions(
             conversation_id=request.call.id,
             message=user_message,
             business_id=business_id,
+            # Explicit, the same way business_id is -- never inferred.
+            # This is what tells ConversationEngine a raw booking-link
+            # URL must never appear in the response (a phone caller
+            # cannot click a link); see conversation_engine.py's
+            # _guard_against_spoken_url and _voice_booking_alternative.
+            channel="voice",
         )
     except BusinessConfigError as error:
         # Same mapping api/routers/chat.py's _handle uses: an unknown or

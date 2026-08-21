@@ -1,5 +1,7 @@
+import re
 from dataclasses import replace
 from typing import Optional
+from urllib.parse import urlparse
 
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from core_ai.conversation_plan import ConversationPlan
@@ -77,29 +79,59 @@ class ConversationEngine:
 
     # Fixed, honest responses for each UnbackedActionCategory -- see
     # _maybe_decline_unbacked_action. Python owns this text completely;
-    # the LLM never generates or rephrases it. {booking_link} is filled
-    # in from this business's own persona config at use time.
+    # the LLM never generates or rephrases it.
+    #
+    # Deliberately WITHOUT the trailing "here's my calendar: {link}"
+    # clause each of these used to end with -- that ending is now built
+    # per-channel in _maybe_decline_unbacked_action (the raw
+    # booking_link for chat, _voice_booking_alternative's spoken-safe
+    # text for voice), from the same shared prefix, so chat output stays
+    # byte-identical while voice never states a URL. See
+    # docs/Decision_Log.md's voice-integration entry for why a caller on
+    # a phone cannot act on a link the way a chat visitor can.
     _UNBACKED_ACTION_TEMPLATES = {
         UnbackedActionCategory.OUT_OF_CHAT_MESSAGE: (
             "I don't have a way to send anything outside this chat -- no "
             "email, text, or file delivery from here. I'm happy to go "
             "through it with you right now, or you're welcome to grab a "
-            "time on the calendar and we can cover it live: {booking_link}"
+            "time on the calendar and we can cover it live"
         ),
         UnbackedActionCategory.ALTERNATE_BOOKING_MECHANISM: (
             "The only way I can actually book with you is right here in "
             "this chat -- I don't have a way to send booking links, "
             "times, or confirmations by email or text. If real times are "
             "available I'll list them right here as numbered options. In "
-            "the meantime, here's my calendar directly: {booking_link}"
+            "the meantime, here's my calendar directly"
         ),
         UnbackedActionCategory.HUMAN_HANDOFF: (
             "I don't have a way to transfer you to someone else from "
             "this chat right now. If you'd like to talk to a real person "
-            "on the team, the fastest way is booking time directly: "
-            "{booking_link}"
+            "on the team, the fastest way is booking time directly"
         ),
     }
+
+    # The one, deterministic fallback sentence for when NEITHER a real
+    # booking link NOR a real email send is honestly offerable on a
+    # voice call -- EmailProvider isn't connected at all. Reused by
+    # _voice_booking_alternative and directly by
+    # _handle_conversation_summary_email_request's voice failure branch
+    # (which must not retry a send that just failed in the same turn).
+    #
+    # Deliberately not "I'll have someone call you back" or "I'll text
+    # you the link": neither is backed by a real code path (no callback
+    # queue exists, and no SMS provider exists -- OUT_OF_CHAT_MESSAGE
+    # already treats "text me" as something Bray has no way to do). A
+    # passive promise about a future human action with nothing in code
+    # guaranteeing it is exactly the shape of claim
+    # UnbackedActionDetector exists to prevent (see its docstring on the
+    # live incident this whole gate responds to); "you're welcome to
+    # call back" makes no promise at all, and is true regardless of any
+    # backend state.
+    _VOICE_ELECTRONIC_DELIVERY_UNAVAILABLE = (
+        "I'm not able to get that over to you electronically right now, "
+        "but you're welcome to call back and we can go through "
+        "everything you need live."
+    )
 
     def __init__(
         self,
@@ -184,7 +216,9 @@ class ConversationEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def process_message(self, conversation_id: str, user_message: str) -> str:
+    def process_message(
+        self, conversation_id: str, user_message: str, channel: str = "chat"
+    ) -> str:
         """
         Main entry point for all incoming customer messages.
 
@@ -197,6 +231,16 @@ class ConversationEngine:
         5. Gather knowledge context.
         6. Build the prompt and generate the assistant response.
         7. Record the response and log the outcome.
+
+        `channel` is "chat" (default) or "voice" -- explicit, passed
+        through by the caller (services/chat_service.py) the same way
+        business_id already flows through, never inferred from the
+        message content or anything else about this turn. It currently
+        affects exactly one thing: what a response says instead of a
+        raw booking-link URL when the normal booking flow can't be
+        offered (a phone caller cannot click a link) -- see
+        _maybe_decline_unbacked_action, PromptBuilder.build's BOOKING
+        SYSTEM ERROR section, and _guard_against_spoken_url below.
         """
 
         history = self._record_user_message(conversation_id, user_message)
@@ -212,9 +256,21 @@ class ConversationEngine:
         # nothing downstream is relevant to a response the model never
         # generates.
         unbacked_action_response = self._maybe_decline_unbacked_action(
-            conversation_id, user_message, lead
+            conversation_id, user_message, lead, channel
         )
         if unbacked_action_response is not None:
+            # Belt-and-braces, not the primary defense here: every
+            # _UNBACKED_ACTION_TEMPLATES ending and
+            # _handle_conversation_summary_email_request's branches are
+            # already channel-correct at the source (see their own
+            # docstrings). Routed through the same guard the generated
+            # path below uses anyway, so "no voice response ever
+            # contains a URL" is enforced in exactly one place, not
+            # separately trusted at every call site that produces
+            # Python-owned text.
+            unbacked_action_response = self._guard_against_spoken_url(
+                conversation_id, unbacked_action_response, channel, lead
+            )
             self.memory.add_assistant_message(conversation_id, unbacked_action_response)
             self.logger.info(
                 f"[UnbackedActionDetector] Deterministic decline used "
@@ -316,6 +372,7 @@ class ConversationEngine:
             working_memory=working_memory,
             long_term_memory=long_term_profile,
             business_config=self.business_config,
+            channel=channel,
         )
 
         messages = self._build_messages(system_prompt, history)
@@ -337,6 +394,23 @@ class ConversationEngine:
         # so neither the visitor nor the conversation history ever
         # contains an invented price. See core_ai/pricing_guard.py.
         response = self._guard_against_invented_price(conversation_id, response)
+
+        # Deterministic backstop for the BOOKING SYSTEM ERROR prompt
+        # section's channel-aware instruction (core_ai/prompt_builder.py)
+        # -- same reasoning as the two guards immediately above: a
+        # prompt instruction alone is not trusted as a guarantee
+        # anywhere else in this pipeline, and there is no reason a
+        # "never say a URL out loud" instruction would be more reliable
+        # than "never invent a price" turned out to be. Applied on every
+        # turn, not only when a booking just failed: a no-op when the
+        # response is already clean (the overwhelming majority of
+        # turns), and a real backstop against ANY generative source of a
+        # spoken URL, not only the one prompt section this build's task
+        # named -- including ENGINE_RULES rules #11/#12's own "offer the
+        # Calendly link" fallback guidance and the raw link baked into
+        # every prompt's context, neither of which needed to be touched
+        # to be covered. See _guard_against_spoken_url's docstring.
+        response = self._guard_against_spoken_url(conversation_id, response, channel, lead)
 
         self.memory.add_assistant_message(conversation_id, response)
 
@@ -502,12 +576,168 @@ class ConversationEngine:
         )
         return PRICE_DEFLECTION_RESPONSE
 
+    def _guard_against_spoken_url(
+        self, conversation_id: str, response: str, channel: str, lead: LeadProfile
+    ) -> str:
+        """
+        Voice-only deterministic backstop: replace a response containing
+        a URL with a spoken-safe alternative, and log loudly that it
+        happened.
+
+        A no-op for chat (returns `response` unchanged, immediately) and
+        a no-op for a clean voice response -- which is the overwhelming
+        majority of turns. This exists for the same reason
+        _guard_against_invented_price does: PromptBuilder's BOOKING
+        SYSTEM ERROR section (and ENGINE_RULES rules #11/#12's own
+        "offer the Calendly link" fallback guidance, present on every
+        turn) are instructions the model can decline, not guarantees,
+        and this pipeline has already measured -- today, on pricing --
+        that "never do X" is not reliably followed just because it is
+        asked nicely. There is no reason to trust "never say a URL out
+        loud" any more than "never invent a price" turned out to
+        deserve.
+
+        Matches ANY http(s)/www URL, plus this specific business's own
+        configured booking_link even without a scheme (a model that
+        drops the instruction might also paraphrase the link without
+        "https://") -- not only the one prompt section this guard was
+        built for. It runs on every voice response regardless of why a
+        URL appears in it, so it also covers ENGINE_RULES' own baked-in
+        Calendly reference and fallback guidance without needing to
+        rewrite ENGINE_RULES itself.
+
+        The whole response is replaced, same reasoning as
+        _guard_against_invented_price: redacting just the URL would
+        leave the surrounding sentence still telling the caller to go
+        look at a link they cannot see. Reuses
+        _voice_booking_alternative -- the same honest, real-capability
+        substitute the fixed decline templates use -- so a caller who
+        hits this guard gets something actually useful, not a bare
+        refusal.
+        """
+        if channel != "voice":
+            return response
+
+        if not self._response_contains_a_url(response):
+            return response
+
+        self.logger.error(
+            f"[VoiceURLGuard] Blocked a spoken URL before it reached the "
+            f"caller (conversation_id={conversation_id}, "
+            f"business_id={self.business_id!r}): response={response!r}"
+        )
+        return self._voice_booking_alternative(conversation_id, lead)
+
+    # Matches any well-formed http(s)/www URL, regardless of domain --
+    # broader than just this business's own booking_link, since the
+    # guarantee needs to hold even if a future response mentions some
+    # other link entirely (a case study, a competitor's site quoted back,
+    # anything).
+    _URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+    def _response_contains_a_url(self, response: str) -> bool:
+        """
+        True if `response` contains anything a caller could not act on
+        by ear -- a scheme-having URL, or this business's own configured
+        booking_link even quoted without a scheme (host name alone,
+        e.g. "calendly.com/...", is not naturally speakable either).
+        """
+        if self._URL_PATTERN.search(response):
+            return True
+
+        booking_link = self.business_config.persona.booking_link or ""
+        if not booking_link:
+            return False
+
+        if booking_link in response:
+            return True
+
+        host = urlparse(booking_link).netloc
+        return bool(host) and host in response
+
     # ------------------------------------------------------------------
     # Unbacked action requests
     # ------------------------------------------------------------------
 
+    def _voice_booking_alternative(self, conversation_id: str, lead: LeadProfile) -> str:
+        """
+        What to say instead of a raw booking-link URL, on a voice call.
+
+        A visitor on a phone call cannot click a link, and reading one
+        aloud is not something anyone can act on. The only honest
+        alternative is EmailProvider -- a real, already-built capability
+        (see scheduling/email_provider.py), not a new promise: if the
+        caller's email is already known and EmailProvider is genuinely
+        connected, the booking link is emailed right now and the caller
+        is told truthfully that it was. Otherwise, the caller is asked
+        for their email -- mirroring exactly the same "ask, never
+        invent" pattern _handle_conversation_summary_email_request
+        already uses when lead.email is unmet -- which is a real next
+        step, not a guess about what will happen.
+
+        Deliberately NOT "I'll text you the link": no SMS provider
+        exists anywhere in this codebase --
+        core_ai/unbacked_action_detector.py's own OUT_OF_CHAT_MESSAGE_
+        PHRASES already treats "text me" as something Bray has no way to
+        do, so claiming it here for voice would be the exact class of
+        fabricated capability this whole gate exists to prevent.
+        Deliberately NOT "I'll have someone call you back" either: no
+        callback mechanism exists in code (no queue, no notification to
+        the founder) -- a passive promise about a future human action
+        with nothing guaranteeing it is exactly the shape of claim that
+        produced the live incident UnbackedActionDetector's own
+        docstring records. Reused as-is by _guard_against_spoken_url as
+        the deterministic backstop's replacement text too, so there is
+        exactly one definition of "the honest voice alternative", not
+        one per call site.
+
+        Used from three call sites: each of the three fixed decline
+        templates below (via _maybe_decline_unbacked_action), and
+        _guard_against_spoken_url when the model generates a URL despite
+        being told not to. NOT used by
+        _handle_conversation_summary_email_request's own failure branch,
+        which is already mid-send-attempt when it would fire --
+        re-entering here would silently retry the same send that just
+        failed, in the same turn, to the same address. That branch uses
+        _VOICE_ELECTRONIC_DELIVERY_UNAVAILABLE directly instead.
+        """
+        if not self.email_provider.is_connected(self.business_id):
+            return self._VOICE_ELECTRONIC_DELIVERY_UNAVAILABLE
+
+        if not lead.email:
+            return (
+                "What's the best email address? I'll get the booking "
+                "link right over to you."
+            )
+
+        booking_link = self.business_config.persona.booking_link or ""
+        business_name = self.business_config.identity.business_name
+
+        result = self.email_provider.send_email(
+            self.business_id,
+            to=lead.email,
+            subject=f"Book a time with {business_name}",
+            body_text=f"Here's the link to grab a time that works: {booking_link}",
+        )
+
+        if result.get("success"):
+            return (
+                f"I've just emailed the booking link to {lead.email} so "
+                f"you can grab a time that works."
+            )
+
+        self.logger.error(
+            f"[VoiceBookingAlternative] Failed to email booking link "
+            f"(conversation_id={conversation_id}, business_id={self.business_id!r}): "
+            f"{result.get('error')}"
+        )
+        return (
+            "What's the best email address? I'll get the booking link "
+            "right over to you."
+        )
+
     def _maybe_decline_unbacked_action(
-        self, conversation_id: str, user_message: str, lead: LeadProfile
+        self, conversation_id: str, user_message: str, lead: LeadProfile, channel: str
     ) -> Optional[str]:
         """
         Deterministic gate for a visitor asking Bray to do something this
@@ -531,13 +761,19 @@ class ConversationEngine:
             return None
 
         if category == UnbackedActionCategory.CONVERSATION_SUMMARY_EMAIL:
-            return self._handle_conversation_summary_email_request(conversation_id, lead)
+            return self._handle_conversation_summary_email_request(
+                conversation_id, lead, channel
+            )
+
+        prefix = self._UNBACKED_ACTION_TEMPLATES[category]
+        if channel == "voice":
+            return f"{prefix}. {self._voice_booking_alternative(conversation_id, lead)}"
 
         booking_link = self.business_config.persona.booking_link or ""
-        return self._UNBACKED_ACTION_TEMPLATES[category].format(booking_link=booking_link)
+        return f"{prefix}: {booking_link}"
 
     def _handle_conversation_summary_email_request(
-        self, conversation_id: str, lead: LeadProfile
+        self, conversation_id: str, lead: LeadProfile, channel: str
     ) -> str:
         """
         Handle a CONVERSATION_SUMMARY_EMAIL match: send a real email when
@@ -557,16 +793,25 @@ class ConversationEngine:
           2. lead.email is known. Unmet: ask for it -- never invent an
              address, never silently drop the request.
           3. The real EmailProvider.send_email() call itself succeeds.
-             Unmet: apologize and fall back to the booking link, the
-             same pattern _maybe_resolve_booking's failure branch uses
-             for a failed calendar write.
+             Unmet: apologize and fall back to a real next step -- the
+             booking link for chat, or (voice) the same honest
+             electronic-delivery-unavailable line _voice_booking_
+             alternative falls back to when EmailProvider isn't
+             connected, WITHOUT re-attempting the send that just failed
+             (see _voice_booking_alternative's docstring on why it is
+             not reused for this specific branch).
         """
-        booking_link = self.business_config.persona.booking_link or ""
-
         if not self.email_provider.is_connected(self.business_id):
-            return self._UNBACKED_ACTION_TEMPLATES[
-                UnbackedActionCategory.OUT_OF_CHAT_MESSAGE
-            ].format(booking_link=booking_link)
+            if channel == "voice":
+                return (
+                    f"{self._UNBACKED_ACTION_TEMPLATES[UnbackedActionCategory.OUT_OF_CHAT_MESSAGE]}. "
+                    f"{self._VOICE_ELECTRONIC_DELIVERY_UNAVAILABLE}"
+                )
+            booking_link = self.business_config.persona.booking_link or ""
+            return (
+                f"{self._UNBACKED_ACTION_TEMPLATES[UnbackedActionCategory.OUT_OF_CHAT_MESSAGE]}: "
+                f"{booking_link}"
+            )
 
         if not lead.email:
             return (
@@ -589,6 +834,14 @@ class ConversationEngine:
             f"(conversation_id={conversation_id}, business_id={self.business_id!r}): "
             f"{result.get('error')}"
         )
+
+        if channel == "voice":
+            return (
+                "I tried to send that summary just now but hit a technical "
+                f"issue on my end. {self._VOICE_ELECTRONIC_DELIVERY_UNAVAILABLE}"
+            )
+
+        booking_link = self.business_config.persona.booking_link or ""
         return (
             "I tried to send that summary just now but hit a technical "
             f"issue on my end. In the meantime, here's my calendar so we "

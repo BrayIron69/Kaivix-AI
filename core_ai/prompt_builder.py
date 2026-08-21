@@ -77,6 +77,7 @@ RULES:
         working_memory=None,
         long_term_memory=None,
         business_config: Optional[BusinessConfig] = None,
+        channel: str = "chat",
     ) -> str:
         # `plan` (a ConversationPlan) carries the deterministic decisions
         # already made by PlanningEngine. `working_memory` carries the
@@ -89,6 +90,18 @@ RULES:
         # same contact (produced by the separate LongTermMemory
         # component). This method only formats those into prompt text —
         # it does not decide or compute anything itself.
+        #
+        # `channel` is "chat" (default, unchanged behaviour, matches
+        # every existing caller and test) or "voice" -- explicit, passed
+        # by ConversationEngine.process_message the same way business_id
+        # already flows through the pipeline, never inferred from stage/
+        # intent/goal. Currently the ONE thing it changes is the BOOKING
+        # SYSTEM ERROR section below, which offers a raw URL for chat and
+        # must never do that for voice (a phone caller cannot click a
+        # link). See ConversationEngine._guard_against_spoken_url for the
+        # deterministic backstop this instruction alone is not relied on
+        # to be -- the same "prompt rule is the first line of defense,
+        # not the guarantee" stance as pricing_guard.py.
 
         if missing_fields is None:
             missing_fields = []
@@ -234,14 +247,39 @@ RULES:
 
             plan_booking_failed = bool(getattr(plan, "booking_failed", False))
             if plan_booking_failed:
-                booking_link = business_config.persona.booking_link or ""
-                sections += [
-                    "",
-                    "BOOKING SYSTEM ERROR:",
-                    "The calendar booking attempt just failed. Apologize briefly for the "
-                    "technical issue, then offer this booking link as a fallback instead: "
-                    f"{booking_link}",
-                ]
+                if channel == "voice":
+                    # A caller on a phone cannot see or click a link, and
+                    # reading a URL aloud is not something anyone can act
+                    # on. This is the first line of defense only -- an
+                    # instruction the model can decline, same as any
+                    # other ENGINE_RULES rule -- not the guarantee.
+                    # ConversationEngine._guard_against_spoken_url is the
+                    # deterministic backstop that holds regardless of
+                    # what the model does with this instruction; see its
+                    # docstring for why a prompt instruction alone is
+                    # not treated as sufficient anywhere else in this
+                    # codebase either (pricing_guard.py, em_dash_filter.py).
+                    sections += [
+                        "",
+                        "BOOKING SYSTEM ERROR:",
+                        "The calendar booking attempt just failed. Apologize briefly for "
+                        "the technical issue, in your own natural words. This is a phone "
+                        "call: the caller cannot see or click anything, so you must NEVER "
+                        "say a web address, link, or URL out loud -- not this business's "
+                        "booking link, not any other. Instead, offer to get them a real "
+                        "booking link by email: if you already know their email address, "
+                        "say you will get it sent over; if you do not, ask for the best "
+                        "email address to send it to.",
+                    ]
+                else:
+                    booking_link = business_config.persona.booking_link or ""
+                    sections += [
+                        "",
+                        "BOOKING SYSTEM ERROR:",
+                        "The calendar booking attempt just failed. Apologize briefly for the "
+                        "technical issue, then offer this booking link as a fallback instead: "
+                        f"{booking_link}",
+                    ]
 
         sections += [
             "",
