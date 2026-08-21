@@ -15,7 +15,7 @@ class TestQualificationEngineDefault(unittest.TestCase):
         engine = QualificationEngine()
         self.assertEqual(
             engine.required_fields,
-            ["name", "email", "company", "budget", "timeline"],
+            ["name", "company", "email", "budget", "timeline"],
         )
 
     def test_qualification_progress_matches_prior_behavior(self):

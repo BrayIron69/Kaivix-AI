@@ -28,7 +28,7 @@ KAIVIX_DOCUMENT_STEMS = {
     "services",
 }
 
-KAIVIX_REQUIRED_FIELDS = ["name", "email", "company", "budget", "timeline"]
+KAIVIX_REQUIRED_FIELDS = ["name", "company", "email", "budget", "timeline"]
 
 
 def _stub_llm(engine: ConversationEngine) -> None:
