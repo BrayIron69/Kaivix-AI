@@ -2,9 +2,9 @@
 Vapi custom-LLM webhook (api/routers/voice.py).
 
 Reuses _MultiBusinessMixin verbatim from tests/test_multi_business_serving.py
--- the same "swap chat_router_module.chat_service / api_key_store for a
-test-controlled double" approach already established for the chat
-integration tests. voice.py accesses chat_router.chat_service and
+-- the same "swap chat_router_module.chat_service for a test-controlled
+double, and patch BUSINESS_API_KEYS to a test-controlled value" approach
+already established for the chat integration tests. voice.py accesses chat_router.chat_service and
 chat_router.require_business_api_key as module ATTRIBUTES at call/request
 time rather than binding local names at import time, so that swap reaches
 voice.py's requests automatically -- no separate voice-specific mocking
@@ -374,7 +374,7 @@ class TestVoiceRouteAuthenticationIsReused(_MultiBusinessMixin, unittest.TestCas
         self.assertEqual(response.status_code, 200)
 
     def test_kaivix_key_does_not_unlock_business_b(self):
-        kaivix_key = chat_router_module.api_key_store.issue_key(DEFAULT_BUSINESS_ID)
+        kaivix_key = self.issue_key(DEFAULT_BUSINESS_ID)
 
         response = self.client.post(
             VOICE_URL,

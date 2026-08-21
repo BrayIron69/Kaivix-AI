@@ -30,7 +30,8 @@ traffic share the exact same cached ConversationEngine instance rather
 than each channel paying for and holding a separate one.
 
 Authentication reuses require_business_api_key -- the SAME X-API-Key
-scheme and the SAME APIKeyStore already protecting
+scheme and the SAME key source (auth/business_api_keys.py, resolved from
+the BUSINESS_API_KEYS environment variable) already protecting
 POST /chat/{business_id} -- rather than inventing a second credential
 system for a second channel. This is a real, unauthenticated-by-default
 gap otherwise: unlike the chat widget (deliberately open, because it has
@@ -46,8 +47,8 @@ turns out not to support an arbitrary header name, swap this dependency
 for one reading the `Authorization` header instead (Vapi's own default
 convention for authenticating TO a custom LLM, per Vapi's docs) --
 whichever it is, the actual verification stays require_business_api_key's
-existing X-API-Key-against-APIKeyStore logic; only the header read would
-change.
+existing logic (business_api_keys.verify_key, scoped by business_id and
+constant-time); only the header read would change.
 
 NOT DONE HERE, on purpose (see item 5): no real Vapi account, phone
 number, or assistant is configured against this endpoint. This is the

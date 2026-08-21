@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -31,7 +32,7 @@ import memory.conversation_store as conversation_store_module
 import memory.long_term_memory as ltm_module
 from api.main import app
 from api.routers import chat as chat_router_module
-from auth.api_key_store import APIKeyStore
+from auth import business_api_keys
 from core_ai.business_config import DEFAULT_BUSINESS_ID
 from core_ai.conversation_engine import ConversationEngine
 from crm.sqlite_crm import SQLiteCRM
@@ -190,41 +191,63 @@ class _MultiBusinessMixin(_IsolatedDatabasesMixin):
 
     def _isolate_api_keys(self):
         """
-        Point the chat router's APIKeyStore at a fresh temp file and issue a
-        key for business-b.
+        Point BUSINESS_API_KEYS at a test-controlled value for the duration
+        of the test.
 
         POST /chat/{business_id} requires a valid key per business (see
         tests/test_chat_business_auth.py); these tests are about routing and
         isolation, not about auth, so they authenticate legitimately via
-        auth_headers() and assert on what happens afterwards. Nothing here
-        touches the real auth/api_keys.db.
+        auth_headers() and assert on what happens afterwards.
+
+        Keys now live in the environment rather than a SQLite file (see
+        auth/business_api_keys.py), so isolation is patch.dict on os.environ
+        rather than a temp database -- and because the router reads the
+        variable on every call, the patch takes effect without swapping any
+        module attribute. Starts EMPTY, so a business only has a key once a
+        test asks for one; nothing here can see a real key from a developer's
+        own .env.
         """
-        fd, db_path = tempfile.mkstemp(suffix=".db")
-        os.close(fd)
-        os.remove(db_path)
+        self._issued_keys: dict[str, str] = {}
+        self._key_hashes: dict[str, str] = {}
 
-        self.key_store = APIKeyStore(db_path=db_path)
-        self._issued_keys = {}
+        env = patch.dict(os.environ, {business_api_keys.ENV_VAR: "{}"})
+        env.start()
+        self.addCleanup(env.stop)
 
-        original_store = chat_router_module.api_key_store
-        chat_router_module.api_key_store = self.key_store
+    def _publish_key_hashes(self):
+        """Write the current mapping back into the patched environment."""
+        os.environ[business_api_keys.ENV_VAR] = json.dumps(self._key_hashes)
 
-        def _restore():
-            chat_router_module.api_key_store = original_store
-            if os.path.exists(db_path):
-                os.remove(db_path)
+    def issue_key(self, business_id: str) -> str:
+        """
+        Generate a fresh key for business_id and make it the valid one,
+        returning the plaintext.
 
-        self.addCleanup(_restore)
+        Replaces a previous key for the same business, which is how
+        rotation works -- the same semantics the old
+        APIKeyStore.issue_key had.
+        """
+        key = business_api_keys.generate_key()
+        self._issued_keys[business_id] = key
+        self._key_hashes[business_id] = business_api_keys.hash_key(key)
+        self._publish_key_hashes()
+        return key
+
+    def revoke_key(self, business_id: str) -> None:
+        """Remove this business's key entirely, so it authenticates nothing."""
+        self._issued_keys.pop(business_id, None)
+        self._key_hashes.pop(business_id, None)
+        self._publish_key_hashes()
 
     def auth_headers(self, business_id: str = BUSINESS_B) -> dict:
         """
         A valid X-API-Key header for business_id, issuing one on first use.
 
-        The plaintext is cached here because the store only ever returns it
-        once, at issue time -- there is no way to read it back.
+        The plaintext is cached here because only its hash goes into the
+        environment -- there is no way to read the key back out.
         """
         if business_id not in self._issued_keys:
-            self._issued_keys[business_id] = self.key_store.issue_key(business_id)
+            self.issue_key(business_id)
 
         return {"X-API-Key": self._issued_keys[business_id]}
 

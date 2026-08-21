@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 
-from auth.api_key_store import APIKeyStore
+from auth import business_api_keys
 from core_ai.business_config import BusinessConfigError, DEFAULT_BUSINESS_ID
 from schemas.chat import MAX_MESSAGE_LENGTH, ChatRequest, ChatResponse
 from services.chat_service import ChatService
@@ -11,8 +11,6 @@ router = APIRouter(
 )
 
 chat_service = ChatService()
-
-api_key_store = APIKeyStore()
 
 # Plain `X-API-Key`, rather than `Authorization: Bearer`. Bearer implies a
 # token the server can introspect for a subject; here the header's value IS
@@ -47,8 +45,17 @@ def require_business_api_key(
     holding no valid credential has no right to ask. In particular an
     unprovisioned business is closed, not open: unconfigured means denied,
     the same stance as api/routers/admin.py's "no default credentials".
+
+    Keys come from the BUSINESS_API_KEYS environment variable, not from a
+    local database -- see auth/business_api_keys.py for why that changed.
+    The verification logic itself (scoped by business_id before any
+    comparison, constant-time, hash-at-rest) is unchanged.
+
+    Called as a module attribute rather than a `from ... import`, so tests
+    that patch the environment see their patch take effect -- the value is
+    read on every call, never cached at import.
     """
-    if not api_key_store.verify_key(business_id, x_api_key):
+    if not business_api_keys.verify_key(business_id, x_api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
