@@ -70,7 +70,7 @@ def require_business_api_key(
         # exposes nothing the env var doesn't already hold.
         raw_header = request.headers.get(API_KEY_HEADER)
         expected_hash = business_api_keys._load_key_hashes().get(business_id)
-        Logger().error(
+        debug_line = (
             "[AuthDebug-TEMP] "
             f"path={request.url.path!r} business_id={business_id!r} | "
             f"parsed_key len={len(x_api_key) if x_api_key else 0} "
@@ -80,6 +80,17 @@ def require_business_api_key(
             f"expected_hash_configured={expected_hash is not None} "
             f"expected_hash={expected_hash}"
         )
+        # Logger() alone writes only to logs/app.log on local disk -- on
+        # Render (no persistent disk, and the dashboard's Logs view is
+        # stdout/stderr only) that file is invisible and gets wiped on
+        # the next deploy. print() is what actually reaches the captured
+        # log stream, same reasoning ConversationEngine._log_turn_summary
+        # already documents ("stdout is not a safer destination than the
+        # log file -- under a container runtime it is collected the same
+        # way"). Both are kept: print for Render's Logs view, Logger for
+        # local/file-based debugging.
+        print(debug_line)
+        Logger().error(debug_line)
         # --- END TEMPORARY DEBUG LOGGING ---
 
         raise HTTPException(
