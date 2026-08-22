@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
 from auth import business_api_keys
 from core_ai.business_config import BusinessConfigError, DEFAULT_BUSINESS_ID
 from schemas.chat import MAX_MESSAGE_LENGTH, ChatRequest, ChatResponse
 from services.chat_service import ChatService
+from utils.logger import Logger
 
 router = APIRouter(
     prefix="/chat",
@@ -23,6 +24,7 @@ API_KEY_HEADER = "X-API-Key"
 
 def require_business_api_key(
     business_id: str,
+    request: Request,
     x_api_key: str | None = Header(default=None, alias=API_KEY_HEADER),
 ) -> None:
     """
@@ -56,6 +58,30 @@ def require_business_api_key(
     read on every call, never cached at import.
     """
     if not business_api_keys.verify_key(business_id, x_api_key):
+        # --- TEMPORARY DEBUG LOGGING -- remove once the live Vapi 401 is
+        # diagnosed (see chat log ~2026-08-22, "isolate the real 401").
+        # Never logs the raw key -- only lengths and SHA-256 hashes, same
+        # non-echo discipline as test_401_does_not_echo_the_presented_key.
+        # `x_api_key` is what FastAPI bound from the header; `raw_header`
+        # is read directly off the ASGI request, independent of FastAPI's
+        # own parsing, to catch anything upstream altering the value
+        # before it reaches the comparison. `expected_hash` is already a
+        # one-way SHA-256 hash at rest in BUSINESS_API_KEYS, so logging it
+        # exposes nothing the env var doesn't already hold.
+        raw_header = request.headers.get(API_KEY_HEADER)
+        expected_hash = business_api_keys._load_key_hashes().get(business_id)
+        Logger().error(
+            "[AuthDebug-TEMP] "
+            f"path={request.url.path!r} business_id={business_id!r} | "
+            f"parsed_key len={len(x_api_key) if x_api_key else 0} "
+            f"sha256={business_api_keys.hash_key(x_api_key) if x_api_key else None} | "
+            f"raw_header len={len(raw_header) if raw_header else 0} "
+            f"sha256={business_api_keys.hash_key(raw_header) if raw_header else None} | "
+            f"expected_hash_configured={expected_hash is not None} "
+            f"expected_hash={expected_hash}"
+        )
+        # --- END TEMPORARY DEBUG LOGGING ---
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=(
