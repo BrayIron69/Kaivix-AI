@@ -55,8 +55,12 @@ register_exception_handlers(app)
 register_logging_middleware(app)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def root():
+    # FastAPI does not add HEAD automatically for a GET-only route (verified
+    # locally, not assumed) -- an uptime monitor probing with HEAD got a
+    # bare 405 on every check, which is exactly the repeated
+    # "HEAD / HTTP/1.1" 405 pattern seen in every deploy log this session.
     return {
         "message": "Kaivix Labs AI Sales Agent API"
     }
