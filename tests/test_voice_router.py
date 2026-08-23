@@ -25,6 +25,7 @@ asked for:
      and is not repeated here).
 """
 
+import json
 import unittest
 
 from api.routers import chat as chat_router_module
@@ -39,6 +40,30 @@ from tests.test_multi_business_serving import (
 )
 
 VOICE_URL = f"/voice/{BUSINESS_B}/chat/completions"
+
+
+def _reassemble_sse_content(response) -> str:
+    """
+    Parse a `text/event-stream` chat.completion.chunk response the way a
+    real SSE client (Vapi's own) actually does: join every frame's
+    `delta.content` in order, stopping at the literal `data: [DONE]`
+    line. `_vapi_request` sets `stream: True` by default -- matching a
+    real Vapi request -- so this is what most of these tests need to
+    read the full reply back with, now that the route honors that field
+    instead of silently ignoring it (see api/routers/voice.py's module
+    docstring for why that changed).
+    """
+    content = ""
+    for line in response.text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: "):]
+        if payload == "[DONE]":
+            break
+        chunk = json.loads(payload)
+        delta = chunk["choices"][0]["delta"]
+        content += delta.get("content") or ""
+    return content
 
 
 def _vapi_request(
@@ -94,7 +119,7 @@ class TestWebhookReachesTheRightConversationEngine(_MultiBusinessMixin, unittest
         )
 
         self.assertEqual(response.status_code, 200)
-        content = response.json()["choices"][0]["message"]["content"]
+        content = _reassemble_sse_content(response)
 
         self.assertIn(BUSINESS_B_IDENTITY.splitlines()[0], content)
         self.assertNotIn("Bray", content)
@@ -109,7 +134,7 @@ class TestWebhookReachesTheRightConversationEngine(_MultiBusinessMixin, unittest
 
         self.assertIn(
             BUSINESS_B_KNOWLEDGE,
-            response.json()["choices"][0]["message"]["content"],
+            _reassemble_sse_content(response),
         )
 
     def test_call_id_becomes_the_conversation_id(self):
@@ -189,7 +214,13 @@ class TestWebhookReachesTheRightConversationEngine(_MultiBusinessMixin, unittest
 
 
 class TestResponseIsOpenAIChatCompletionShaped(_MultiBusinessMixin, unittest.TestCase):
-    """Item 2: the real response comes back in the correct shape."""
+    """
+    Item 2: the real response comes back in the correct shape, for a
+    non-streaming request (`stream: False`, explicit on every call here
+    since `_vapi_request` defaults `stream` to True to model a real Vapi
+    request -- see TestStreamingResponseIsOpenAISSEChunkShaped below for
+    the shape a real request actually gets).
+    """
 
     def setUp(self):
         self._setup_two_businesses(llm_stub=lambda messages: "the spoken reply")
@@ -197,7 +228,7 @@ class TestResponseIsOpenAIChatCompletionShaped(_MultiBusinessMixin, unittest.Tes
     def test_top_level_shape_matches_openai_chat_completion(self):
         response = self.client.post(
             VOICE_URL,
-            json=_vapi_request("hi", call_id="call_shape_1"),
+            json=_vapi_request("hi", call_id="call_shape_1", stream=False),
             headers=self.auth_headers(),
         )
 
@@ -214,7 +245,7 @@ class TestResponseIsOpenAIChatCompletionShaped(_MultiBusinessMixin, unittest.Tes
     def test_choice_shape_matches_openai(self):
         response = self.client.post(
             VOICE_URL,
-            json=_vapi_request("hi", call_id="call_shape_2"),
+            json=_vapi_request("hi", call_id="call_shape_2", stream=False),
             headers=self.auth_headers(),
         )
 
@@ -229,7 +260,7 @@ class TestResponseIsOpenAIChatCompletionShaped(_MultiBusinessMixin, unittest.Tes
     def test_response_content_is_the_engines_real_output_verbatim(self):
         response = self.client.post(
             VOICE_URL,
-            json=_vapi_request("hi", call_id="call_shape_3"),
+            json=_vapi_request("hi", call_id="call_shape_3", stream=False),
             headers=self.auth_headers(),
         )
 
@@ -239,34 +270,95 @@ class TestResponseIsOpenAIChatCompletionShaped(_MultiBusinessMixin, unittest.Tes
 
     def test_response_ids_are_unique_per_request(self):
         first = self.client.post(
-            VOICE_URL, json=_vapi_request("hi", call_id="call_id_1"),
+            VOICE_URL, json=_vapi_request("hi", call_id="call_id_1", stream=False),
             headers=self.auth_headers(),
         ).json()
         second = self.client.post(
-            VOICE_URL, json=_vapi_request("hi again", call_id="call_id_1"),
+            VOICE_URL, json=_vapi_request("hi again", call_id="call_id_1", stream=False),
             headers=self.auth_headers(),
         ).json()
 
         self.assertNotEqual(first["id"], second["id"])
 
-    def test_stream_true_still_returns_a_single_non_streaming_json_body(self):
-        """
-        Vapi's request sets stream: true; this route deliberately always
-        returns one non-streaming JSON response (see voice.py's module
-        docstring). Documented by Vapi as an accepted response mode, not
-        merely tolerated.
-        """
+
+class TestStreamingResponseIsOpenAISSEChunkShaped(_MultiBusinessMixin, unittest.TestCase):
+    """
+    A real live call proved Vapi's own client parses zero content out of
+    a flat JSON body when its request sets `stream: true` (the default),
+    despite Vapi's docs claiming both response shapes are accepted --
+    see api/routers/voice.py's module docstring for the full trace from
+    that call's own event log. These tests cover the SSE shape the route
+    now sends instead, which `_vapi_request`'s default `stream: True`
+    exercises without needing to pass it explicitly.
+    """
+
+    def setUp(self):
+        self._setup_two_businesses(llm_stub=lambda messages: "the spoken reply")
+
+    def test_stream_true_returns_sse_not_json(self):
         response = self.client.post(
             VOICE_URL,
-            json=_vapi_request("hi", call_id="call_stream_1", stream=True),
+            json=_vapi_request("hi", call_id="call_stream_1"),
             headers=self.auth_headers(),
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("application/json", response.headers["content-type"])
-        # A single parseable JSON object, not an SSE "data: ..." stream.
-        body = response.json()
-        self.assertIn("choices", body)
+        self.assertIn("text/event-stream", response.headers["content-type"])
+
+    def test_chunks_reassemble_to_the_engines_real_output_verbatim(self):
+        response = self.client.post(
+            VOICE_URL,
+            json=_vapi_request("hi", call_id="call_stream_2"),
+            headers=self.auth_headers(),
+        )
+
+        self.assertEqual(_reassemble_sse_content(response), "the spoken reply")
+
+    def test_first_chunk_carries_the_assistant_role(self):
+        response = self.client.post(
+            VOICE_URL,
+            json=_vapi_request("hi", call_id="call_stream_3"),
+            headers=self.auth_headers(),
+        )
+
+        first_data_line = next(
+            line for line in response.text.splitlines() if line.startswith("data: ")
+        )
+        first_chunk = json.loads(first_data_line[len("data: "):])
+        self.assertEqual(
+            first_chunk["choices"][0]["delta"]["role"], "assistant"
+        )
+
+    def test_stream_ends_with_a_finish_reason_chunk_then_done(self):
+        response = self.client.post(
+            VOICE_URL,
+            json=_vapi_request("hi", call_id="call_stream_4"),
+            headers=self.auth_headers(),
+        )
+
+        data_lines = [
+            line[len("data: "):]
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+
+        self.assertEqual(data_lines[-1], "[DONE]")
+        final_chunk = json.loads(data_lines[-2])
+        self.assertEqual(final_chunk["choices"][0]["finish_reason"], "stop")
+        self.assertIsNone(final_chunk["choices"][0]["delta"].get("content"))
+
+    def test_every_chunk_is_chat_completion_chunk_object_type(self):
+        response = self.client.post(
+            VOICE_URL,
+            json=_vapi_request("hi", call_id="call_stream_5"),
+            headers=self.auth_headers(),
+        )
+
+        for line in response.text.splitlines():
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            chunk = json.loads(line[len("data: "):])
+            self.assertEqual(chunk["object"], "chat.completion.chunk")
 
 
 class TestRequestValidation(_MultiBusinessMixin, unittest.TestCase):

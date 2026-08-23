@@ -123,12 +123,16 @@ class VapiChatCompletionResponse(BaseModel):
     (https://platform.openai.com/docs/api-reference/chat/create) as what
     a custom-LLM response must look like.
 
-    Non-streaming, not SSE, even though Vapi's request sets
-    `stream: true`. Vapi's own docs state explicitly that "Vapi is
-    equipped to handle both response types" (JSON or SSE) -- so
-    non-streaming is documented as acceptable, not merely tolerated as a
-    fallback. This is a deliberate scope decision, not an oversight: see
-    api/routers/voice.py's module docstring for what it costs.
+    Kept for the case Vapi's request does not set `stream: true`
+    (VapiChatCompletionRequest.stream is optional, so a future or
+    non-default integration could still send a plain non-streaming
+    request). For the streaming case, see VapiChatCompletionChunk below --
+    a real live call proved Vapi's documented claim that it "is equipped
+    to handle both response types" does not hold in practice: when the
+    request sets `stream: true`, a flat JSON response here parses as
+    empty content and zero characters ever reach TTS (confirmed against
+    Vapi's own call-logs event export for a real call -- see git history
+    around this change for the full trace).
     """
 
     id: str
@@ -136,3 +140,46 @@ class VapiChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[VapiChatCompletionChoice]
+
+
+class VapiChatCompletionChunkDelta(BaseModel):
+    """
+    The incremental piece of a streamed choice.
+
+    The first chunk for a choice carries `role`; every chunk (first
+    included) may carry `content`; the final chunk for a choice carries
+    neither, only `finish_reason` on the enclosing choice -- exactly
+    OpenAI's SSE chat.completion.chunk contract, which is what Vapi's
+    custom-LLM client actually parses (see VapiChatCompletionChunk).
+    """
+
+    role: str | None = None
+    content: str | None = None
+
+
+class VapiChatCompletionChunkChoice(BaseModel):
+    index: int = 0
+    delta: VapiChatCompletionChunkDelta
+    finish_reason: str | None = None
+
+
+class VapiChatCompletionChunk(BaseModel):
+    """
+    One `chat.completion.chunk` SSE frame.
+
+    Real streaming would forward tokens as the LLM provider produces
+    them; ConversationEngine.process_message is one synchronous call
+    that returns a complete string with no intermediate token stream to
+    forward (see api/routers/voice.py's module docstring for why that is
+    out of scope here). This models the frame *shape* Vapi's client
+    parses; api/routers/voice.py replays the already-complete response
+    text through a sequence of these frames rather than emitting it as
+    a single flat JSON body, which is what a real call proved Vapi
+    silently drops.
+    """
+
+    id: str
+    object: str = "chat.completion.chunk"
+    created: int
+    model: str
+    choices: list[VapiChatCompletionChunkChoice]

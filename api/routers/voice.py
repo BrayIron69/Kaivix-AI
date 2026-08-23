@@ -56,28 +56,47 @@ backend contract existing and working correctly against a simulated
 request -- wiring a real assistant to a real business_id's real URL and
 real key is a founder-account step, not a code step.
 
-STREAMING: not implemented. Vapi's request sets `stream: true`, and this
-route always returns a single non-streaming JSON chat.completion, which
-Vapi's own docs state explicitly it is "equipped to handle" alongside
-SSE -- so this is documented as correct, not merely tolerated. The real
-cost is latency: ConversationEngine.process_message is one synchronous
-call that returns a complete string, there is no intermediate token
-stream to forward, and building one would mean re-architecting how
-process_message produces output -- exactly the "new logic" this build was
-told not to add. On a live phone call (unlike a text chat widow) time-to-
-first-word is what a caller actually perceives while waiting in silence,
-so this is a real, known limitation of this foundation, not a hidden one.
+STREAMING: implemented, after a real call proved the non-streaming
+shortcut silently broken. Vapi's request sets `stream: true`; this route
+used to always return a single flat JSON chat.completion regardless,
+reasoning that Vapi's own docs describe it as "equipped to handle both
+response types." A real live call showed that claim does not hold in
+practice: Vapi's own call-logs event export for that call showed every
+`assistant.model.requestAttemptSucceeded` event parsing `content: ""`
+and `completionTokens: 0` from our 200 OK JSON responses, and
+`assistant.voice.cleanup` showing `charactersUsed: 0` for the whole
+call -- the caller heard nothing after the first line, every turn.
+
+This still does not stream real LLM tokens --
+ConversationEngine.process_message is one synchronous call that returns
+a complete string, and building true token-level streaming would mean
+re-architecting how process_message produces output, which is out of
+scope here (see this module's reuse-not-duplication stance above). What
+changed is the *framing*: the already-complete response text is now
+replayed through a sequence of `chat.completion.chunk` SSE frames
+(_sse_chunks below) instead of one flat JSON body, when the request asks
+for it. This is the same shape Vapi's client actually parses -- proven
+by the real call above -- even though no token arrives before the whole
+answer is ready. Time-to-first-word is therefore unchanged from before;
+what's fixed is that any word arrives at all. A non-streaming request
+(`stream` falsy or absent) still gets the plain JSON body unchanged.
 """
 
+import re
 import time
 import uuid
+from typing import Iterator
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from api.routers import chat as chat_router
 from core_ai.business_config import BusinessConfigError
 from schemas.voice import (
     VapiChatCompletionChoice,
+    VapiChatCompletionChunk,
+    VapiChatCompletionChunkChoice,
+    VapiChatCompletionChunkDelta,
     VapiChatCompletionRequest,
     VapiChatCompletionResponse,
     VapiMessage,
@@ -123,14 +142,57 @@ def _latest_user_message(messages: list[VapiMessage]) -> str:
     )
 
 
+def _sse_chunks(response_text: str, chat_id: str, model_name: str) -> Iterator[str]:
+    """
+    Replay an already-complete response as a sequence of
+    `chat.completion.chunk` SSE frames, ending with the standard
+    `finish_reason: "stop"` frame and a literal `data: [DONE]` line --
+    the shape a real call proved Vapi's client actually needs to extract
+    any content at all (see this module's docstring).
+
+    Split on whitespace runs (`\\S+\\s*`) rather than emitted word-by-word
+    for cosmetic effect: it is the simplest split that reassembles back
+    to the exact original string (no lost or doubled spaces), and it
+    gives Vapi's TTS layer more than one frame to start from without
+    requiring real token-level output from the LLM. An empty
+    response_text still yields one content-carrying frame (content="")
+    before the finish frame, so a stream is never literally empty.
+    """
+    created = int(time.time())
+    words = re.findall(r"\S+\s*", response_text) or [""]
+
+    for index, word in enumerate(words):
+        delta = VapiChatCompletionChunkDelta(
+            role="assistant" if index == 0 else None,
+            content=word,
+        )
+        chunk = VapiChatCompletionChunk(
+            id=chat_id,
+            created=created,
+            model=model_name,
+            choices=[VapiChatCompletionChunkChoice(delta=delta)],
+        )
+        yield f"data: {chunk.model_dump_json()}\n\n"
+
+    final_chunk = VapiChatCompletionChunk(
+        id=chat_id,
+        created=created,
+        model=model_name,
+        choices=[
+            VapiChatCompletionChunkChoice(
+                delta=VapiChatCompletionChunkDelta(), finish_reason="stop"
+            )
+        ],
+    )
+    yield f"data: {final_chunk.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 @router.post(
     "/{business_id}/chat/completions",
-    response_model=VapiChatCompletionResponse,
     dependencies=[Depends(chat_router.require_business_api_key)],
 )
-def voice_chat_completions(
-    business_id: str, request: VapiChatCompletionRequest
-) -> VapiChatCompletionResponse:
+def voice_chat_completions(business_id: str, request: VapiChatCompletionRequest):
     """
     Vapi's custom-LLM webhook target for one business.
 
@@ -138,6 +200,13 @@ def voice_chat_completions(
     existing contract, calls it, and translates the plain string response
     back into an OpenAI-shaped chat.completion -- no qualification,
     booking, or gate logic lives here; see this module's docstring.
+
+    Returns SSE (`text/event-stream`, chat.completion.chunk frames) when
+    the request sets `stream: true` -- which a real call proved is the
+    only shape Vapi's client actually extracts content from -- and the
+    plain non-streaming JSON body otherwise. Not response_model-typed on
+    the route decorator because a single route now legitimately returns
+    either a StreamingResponse or a VapiChatCompletionResponse.
     """
     if request.call is None:
         raise HTTPException(
@@ -174,10 +243,19 @@ def voice_chat_completions(
             detail=f"Unknown or misconfigured business_id: {business_id!r}",
         ) from error
 
+    chat_id = f"chatcmpl-{uuid.uuid4().hex}"
+    model_name = request.model or "kaivix-voice"
+
+    if request.stream:
+        return StreamingResponse(
+            _sse_chunks(response_text, chat_id, model_name),
+            media_type="text/event-stream",
+        )
+
     return VapiChatCompletionResponse(
-        id=f"chatcmpl-{uuid.uuid4().hex}",
+        id=chat_id,
         created=int(time.time()),
-        model=request.model or "kaivix-voice",
+        model=model_name,
         choices=[
             VapiChatCompletionChoice(
                 message=VapiResponseMessage(content=response_text)
