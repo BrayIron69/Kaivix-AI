@@ -395,6 +395,21 @@ class ConversationEngine:
         # contains an invented price. See core_ai/pricing_guard.py.
         response = self._guard_against_invented_price(conversation_id, response)
 
+        # Deterministic backstop for a free-generated email "read-back"
+        # not actually matching the real stored value -- same reasoning
+        # as the price guard immediately above and the URL guard below:
+        # a model reconstructing a fact from its own context is not the
+        # same as quoting it, and a 150-run soak already showed "never
+        # invent a price" isn't reliably followed just because it's
+        # asked nicely, so there is no reason to trust a spoken email
+        # confirmation any further. Applied on every turn; a no-op
+        # unless the response actually attempts to state an email and
+        # gets it wrong. See _guard_against_garbled_email_confirmation's
+        # docstring for the real call this responds to.
+        response = self._guard_against_garbled_email_confirmation(
+            conversation_id, response, lead
+        )
+
         # Deterministic backstop for the BOOKING SYSTEM ERROR prompt
         # section's channel-aware instruction (core_ai/prompt_builder.py)
         # -- same reasoning as the two guards immediately above: a
@@ -575,6 +590,65 @@ class ConversationEngine:
             f"business_id={self.business_id!r}): figures={unapproved}"
         )
         return PRICE_DEFLECTION_RESPONSE
+
+    # ------------------------------------------------------------------
+    # Garbled email confirmation
+    # ------------------------------------------------------------------
+
+    def _guard_against_garbled_email_confirmation(
+        self, conversation_id: str, response: str, lead: LeadProfile
+    ) -> str:
+        """
+        Replace a response that misstates the visitor's already-captured
+        email, and log loudly that it happened.
+
+        Built after a real call where a visitor gave their email
+        correctly once ("It is oskar.m@yarbo.com"), then spelled it out
+        letter by letter to confirm it ("O-S-C-A-R dot M at A-R-B-O dot
+        com") -- EntityExtractor never overwrote the correctly stored
+        value (its EMAIL_PATTERN requires a literal "@", which the
+        spelled-out form never contains), but the model's own SPOKEN
+        confirmation back to the visitor free-generated a garbled
+        variant instead of quoting the real one: "Thanks for confirming
+        oskar.m@. yorbo.com." Two separate bugs with two separate
+        fixes -- this is the second one. A free-generated "read-back" is
+        not a reliable quote of anything in its own context, the same
+        class of failure _guard_against_invented_price and
+        _guard_against_spoken_url already exist to catch for other facts
+        the model must never approximate.
+
+        A no-op unless BOTH: lead.email is already known (nothing to
+        confirm against otherwise), and the response contains an "@" --
+        the one reliable signal the model is attempting to state an
+        email at all, so a normal turn that never mentions email is
+        untouched. Requires an exact substring match against the real
+        stored value; a close-but-wrong variant (dropped letter,
+        different domain, a stray space) counts as "not confirmed" the
+        same as a completely different address would -- the whole point
+        is that nothing short of the real value passes.
+
+        The whole response is replaced rather than the malformed
+        fragment surgically edited: a garbled email does not reliably
+        regex-match as a well-formed one (the real example above breaks
+        EntityExtractor's own EMAIL_PATTERN on the stray space after
+        "@."), so there is no reliable boundary to splice a correction
+        into. A short, deterministic confirmation sentence containing
+        the exact stored value is unambiguous where a partial edit would
+        not be.
+        """
+        if not lead.email or "@" not in response:
+            return response
+
+        if lead.email in response:
+            return response
+
+        self.logger.error(
+            f"[EmailConfirmationGuard] Blocked a garbled email confirmation "
+            f"before it reached the visitor (conversation_id={conversation_id}, "
+            f"business_id={self.business_id!r}): response={response!r} "
+            f"stored_email={lead.email!r}"
+        )
+        return f"Just to confirm, I have your email as {lead.email}."
 
     def _guard_against_spoken_url(
         self, conversation_id: str, response: str, channel: str, lead: LeadProfile

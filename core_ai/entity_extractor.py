@@ -25,6 +25,63 @@ class EntityExtractor:
         re.IGNORECASE,
     )
 
+    # Spelled-out number words this extractor recognizes as part of a
+    # magnitude-word budget answer ("one billion dollars", "a hundred
+    # thousand"). Not exhaustive of every English number word -- covers
+    # the range a real spoken budget answer plausibly uses; repeated via
+    # BUDGET_MAGNITUDE_PATTERN's own grouping below so compounds like "a
+    # hundred" or "twenty five" (before a magnitude word) are covered
+    # too.
+    _BUDGET_NUMBER_WORD = (
+        r"(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten"
+        r"|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen"
+        r"|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy"
+        r"|eighty|ninety|hundred)"
+    )
+
+    _BUDGET_MAGNITUDE_WORD = r"(?:thousand|million|billion)"
+
+    # Joins two words of a spelled-out budget answer. Plain `\s+` is not
+    # enough: a real call's transcript had the visitor's speech pause
+    # transcribed as a stray period -- "How about one. Billion dollars?"
+    # -- which `\s+` alone would refuse to bridge. Voice transcription
+    # commonly inserts a comma or period at a pause with no real clause
+    # break intended, so this tolerates one alongside whitespace.
+    _BUDGET_WORD_JOIN = r"(?:[\s.,]+)"
+
+    # A budget stated with a spelled-out magnitude word -- digits or
+    # words on either side: "one billion dollars", "1 billion dollars",
+    # "50 thousand", "a hundred thousand dollars". BUDGET_PATTERN above
+    # never matches any of these: it requires either a literal `$` or a
+    # digit run directly adjacent to a currency word, and "billion" /
+    # "thousand" / "million" is neither a currency word nor a digit --
+    # confirmed against a real call where a visitor said "one billion
+    # dollars" twice and it was never captured (budget stayed in
+    # QualificationEngine's missing-fields list for the rest of the
+    # call).
+    #
+    # The currency word is optional here (unlike BUDGET_PATTERN's
+    # digit-only branch, where it is required) so a bare "50 thousand"
+    # still counts -- a real spoken answer to "what's your budget?" that
+    # never says "dollars" out loud is common, and this extractor is
+    # already context-blind everywhere else (BUDGET_PATTERN itself
+    # matches "$500" wherever it appears, regardless of whether the
+    # sentence is actually about budget); this is the same accepted
+    # trade-off, not a new one.
+    BUDGET_MAGNITUDE_PATTERN = re.compile(
+        rf"\b(?:\$?\s*[\d,]+(?:\.\d+)?|{_BUDGET_NUMBER_WORD}(?:{_BUDGET_WORD_JOIN}{_BUDGET_NUMBER_WORD})*)"
+        rf"{_BUDGET_WORD_JOIN}{_BUDGET_MAGNITUDE_WORD}"
+        rf"(?:{_BUDGET_WORD_JOIN}(?:usd|dollars|pkr|rs))?\b",
+        re.IGNORECASE,
+    )
+
+    # Normalizes a stray mid-phrase punctuation mark caught by
+    # _BUDGET_WORD_JOIN (see above) back to a plain space once a match is
+    # found, so a real transcription artifact like "one. Billion
+    # dollars" is stored as "one Billion dollars" rather than carrying
+    # the stray period into LeadProfile/the CRM verbatim.
+    _BUDGET_STRAY_PUNCTUATION = re.compile(r"[.,]+(?=\s|$)")
+
     NAME_PATTERNS = [
         r"\bmy name is\s+([A-Za-z]+)",
         r"\bi am\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})",
@@ -380,6 +437,11 @@ class EntityExtractor:
         budget = self.BUDGET_PATTERN.search(text)
         if budget:
             state.budget = budget.group(1).strip()
+        else:
+            budget_magnitude = self.BUDGET_MAGNITUDE_PATTERN.search(text)
+            if budget_magnitude:
+                cleaned = self._BUDGET_STRAY_PUNCTUATION.sub("", budget_magnitude.group(0))
+                state.budget = " ".join(cleaned.split())
 
         # -----------------------------
         # Timeline
