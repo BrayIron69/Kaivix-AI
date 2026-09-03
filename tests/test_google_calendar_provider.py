@@ -150,6 +150,65 @@ class TestGoogleCalendarProviderOAuthCallback(unittest.TestCase):
             },
         )
 
+    @patch("scheduling.render_env_sync.persist_calendar_refresh_token")
+    @patch("google_auth_oauthlib.flow.Flow.from_client_config")
+    def test_callback_persists_refresh_token_to_render_when_present(
+        self, mock_from_client_config, mock_persist
+    ):
+        """
+        calendar_tokens.db does not survive a redeploy (Render has no
+        persistent disk) -- this durable write is what actually does.
+        Must fire with the exact business_id/refresh_token this callback
+        just obtained from Google.
+        """
+        mock_credentials = MagicMock()
+        mock_credentials.token = "access-token"
+        mock_credentials.refresh_token = "refresh-token"
+        mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
+        mock_credentials.scopes = SCOPES
+        mock_credentials.expiry = datetime(2026, 7, 29, 12, 0, 0)
+
+        mock_flow = MagicMock()
+        mock_flow.credentials = mock_credentials
+        mock_from_client_config.return_value = mock_flow
+
+        provider = _make_provider(token_store=MagicMock())
+        provider.handle_oauth_callback(
+            "business-a",
+            "http://localhost:8000/oauth/google/callback?code=abc123&state=business-a",
+        )
+
+        mock_persist.assert_called_once_with("business-a", "refresh-token")
+
+    @patch("scheduling.render_env_sync.persist_calendar_refresh_token")
+    @patch("google_auth_oauthlib.flow.Flow.from_client_config")
+    def test_callback_does_not_persist_when_google_returned_no_refresh_token(
+        self, mock_from_client_config, mock_persist
+    ):
+        """
+        Defensive only -- get_authorization_url always passes
+        prompt="consent" so a real connect/reconnect does receive one --
+        but must never call Render's API with None regardless.
+        """
+        mock_credentials = MagicMock()
+        mock_credentials.token = "access-token"
+        mock_credentials.refresh_token = None
+        mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
+        mock_credentials.scopes = SCOPES
+        mock_credentials.expiry = datetime(2026, 7, 29, 12, 0, 0)
+
+        mock_flow = MagicMock()
+        mock_flow.credentials = mock_credentials
+        mock_from_client_config.return_value = mock_flow
+
+        provider = _make_provider(token_store=MagicMock())
+        provider.handle_oauth_callback(
+            "business-a",
+            "http://localhost:8000/oauth/google/callback?code=abc123&state=business-a",
+        )
+
+        mock_persist.assert_not_called()
+
 
 class TestGoogleCalendarProviderListCalendars(unittest.TestCase):
     @patch("googleapiclient.discovery.build")
@@ -321,6 +380,118 @@ class TestGoogleCalendarProviderIsConnected(unittest.TestCase):
 
         provider = _make_provider(token_store=token_store)
         self.assertTrue(provider.is_connected("business-a"))
+
+    @patch("scheduling.render_env_sync.load_refresh_token")
+    def test_is_connected_true_from_env_var_even_with_no_local_row(self, mock_load_refresh_token):
+        """
+        The exact scenario this whole fix exists for: a fresh process
+        after a redeploy where calendar_tokens.db was wiped (no local
+        row at all), but GOOGLE_CALENDAR_REFRESH_TOKENS still holds this
+        business's refresh_token. Must report connected without ever
+        consulting the local store.
+        """
+        mock_load_refresh_token.return_value = "env-refresh-token"
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        self.assertTrue(provider.is_connected("business-a"))
+        token_store.load_token.assert_not_called()
+
+    @patch("scheduling.render_env_sync.load_refresh_token")
+    def test_is_connected_falls_back_to_local_row_when_env_var_has_nothing_for_this_business(
+        self, mock_load_refresh_token
+    ):
+        mock_load_refresh_token.return_value = None
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        self.assertFalse(provider.is_connected("business-a"))
+        token_store.load_token.assert_called_once_with("business-a")
+
+
+class TestGoogleCalendarProviderLoadCredentialsFromEnv(unittest.TestCase):
+    """
+    _load_credentials preferring GOOGLE_CALENDAR_REFRESH_TOKENS over the
+    local SQLite row -- the durable copy wins because the local row may
+    have been wiped by a redeploy, or may simply be stale relative to a
+    token rotated through a later reconnect.
+    """
+
+    @patch("google.auth.transport.requests.Request")
+    @patch("google.oauth2.credentials.Credentials")
+    @patch("scheduling.render_env_sync.load_refresh_token")
+    def test_builds_credentials_from_env_token_and_refreshes_even_with_no_local_row(
+        self, mock_load_refresh_token, mock_credentials_cls, mock_request_cls
+    ):
+        mock_load_refresh_token.return_value = "env-refresh-token"
+        mock_credentials = MagicMock()
+        mock_credentials_cls.return_value = mock_credentials
+
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        result = provider._load_credentials("business-a")
+
+        mock_credentials_cls.assert_called_once_with(
+            token=None,
+            refresh_token="env-refresh-token",
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=provider.client_id,
+            client_secret=provider.client_secret,
+            scopes=SCOPES,
+            expiry=None,
+        )
+        mock_credentials.refresh.assert_called_once()
+        token_store.save_token.assert_called_once()
+        self.assertIs(result, mock_credentials)
+
+    @patch("google.auth.transport.requests.Request")
+    @patch("google.oauth2.credentials.Credentials")
+    @patch("scheduling.render_env_sync.load_refresh_token")
+    def test_env_token_wins_over_a_present_but_different_local_row(
+        self, mock_load_refresh_token, mock_credentials_cls, mock_request_cls
+    ):
+        """
+        Even when a local row DOES exist, the env-sourced token is
+        treated as the source of truth -- it may have been rotated
+        through a reconnect that happened on a different process/deploy
+        than the one that wrote the current local row.
+        """
+        mock_load_refresh_token.return_value = "env-refresh-token"
+        mock_credentials = MagicMock()
+        mock_credentials_cls.return_value = mock_credentials
+
+        token_store = MagicMock()
+        token_store.load_token.return_value = {
+            "business_id": "business-a",
+            "token": "stale-local-token",
+            "refresh_token": "stale-local-refresh-token",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "scopes": SCOPES,
+            "expiry": None,
+        }
+
+        provider = _make_provider(token_store=token_store)
+        provider._load_credentials("business-a")
+
+        _, kwargs = mock_credentials_cls.call_args
+        self.assertEqual(kwargs["refresh_token"], "env-refresh-token")
+
+    @patch("scheduling.render_env_sync.load_refresh_token")
+    def test_falls_back_to_local_row_when_env_var_has_nothing_for_this_business(
+        self, mock_load_refresh_token
+    ):
+        mock_load_refresh_token.return_value = None
+        token_store = MagicMock()
+        token_store.load_token.return_value = None
+
+        provider = _make_provider(token_store=token_store)
+        result = provider._load_credentials("business-a")
+
+        self.assertIsNone(result)
 
 
 class TestGoogleCalendarProviderSubtractBusy(unittest.TestCase):

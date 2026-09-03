@@ -16,6 +16,7 @@ import utils.env  # noqa: F401
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from scheduling.base_calendar_provider import BaseCalendarProvider
 from scheduling.calendar_token_store import CalendarTokenStore
+from scheduling import render_env_sync
 from utils.logger import Logger
 
 # Fixed business-hours window used by get_free_busy_slots for every
@@ -221,6 +222,40 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         from google.oauth2.credentials import Credentials
 
         stored = self.token_store.load_token(business_id)
+
+        # GOOGLE_CALENDAR_REFRESH_TOKENS (see render_env_sync) is the
+        # durable copy -- it survives a redeploy, calendar_tokens.db does
+        # not (Render has no persistent disk; see that module's
+        # docstring). When it holds a refresh_token for this business,
+        # it wins over whatever is in the local row: after a fresh
+        # deploy `stored` is None (the SQLite file was wiped) even
+        # though the connection is genuinely still live, and even when
+        # `stored` does exist there is no way to tell, without this
+        # check, whether it survived from before the last deploy or is
+        # simply stale relative to a token rotated through a later
+        # reconnect.
+        #
+        # Deliberately never trust `stored`'s own access token/expiry in
+        # this branch: forcing a real refresh() below is one extra
+        # network call to Google, not a second wipe-prone store, and it
+        # is the only way to be correct immediately after a redeploy
+        # without reasoning about how stale a locally cached access
+        # token might be.
+        env_refresh_token = render_env_sync.load_refresh_token(business_id)
+        if env_refresh_token:
+            credentials = Credentials(
+                token=None,
+                refresh_token=env_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scopes=SCOPES,
+                expiry=None,
+            )
+            credentials.refresh(Request())
+            self.token_store.save_token(business_id, self._credentials_to_dict(credentials))
+            return credentials
+
         if stored is None:
             return None
 
@@ -263,7 +298,16 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         refreshes them transparently on next use. Reuses
         _deserialize_expiry, the same expiry-parsing logic
         _needs_refresh uses for the proactive-refresh fix.
+
+        Checks GOOGLE_CALENDAR_REFRESH_TOKENS first (see
+        render_env_sync): it is the value that survives a redeploy, so a
+        business reconnected since this fix shipped is reported
+        connected even on a fresh process where calendar_tokens.db has
+        already been wiped and `stored` below is None.
         """
+        if render_env_sync.load_refresh_token(business_id):
+            return True
+
         stored = self.token_store.load_token(business_id)
         if stored is None:
             return False
@@ -324,6 +368,23 @@ class GoogleCalendarProvider(BaseCalendarProvider):
 
         flow.fetch_token(authorization_response=authorization_response_url)
         self.token_store.save_token(business_id, self._credentials_to_dict(flow.credentials))
+
+        # calendar_tokens.db does not survive a redeploy (see
+        # render_env_sync's docstring) -- this is the write that
+        # actually does. Only fires when Google actually returned a
+        # refresh_token: get_authorization_url always passes
+        # prompt="consent" so a real connect/reconnect through this
+        # flow does, but defends anyway rather than persisting None.
+        # Best-effort and non-blocking: this call never raises, so a
+        # failure here (RENDER_API_KEY unset, a network blip) still
+        # leaves the caller with a genuinely working connection for the
+        # rest of this process's life -- it only means the connection
+        # needs to be redone after the next redeploy, which is exactly
+        # today's behavior, not a regression.
+        if flow.credentials.refresh_token:
+            render_env_sync.persist_calendar_refresh_token(
+                business_id, flow.credentials.refresh_token
+            )
 
     def list_calendars(self, business_id: str = DEFAULT_BUSINESS_ID) -> list[dict]:
         from googleapiclient.discovery import build
