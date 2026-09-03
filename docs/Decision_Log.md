@@ -1733,6 +1733,66 @@ Widening `_ALLOWED_DOLLAR_FIGURES` (or otherwise carving out an exception for co
 
 ---
 
+# Decision #032
+
+## Calendar OAuth Refresh Token Persisted To Render Env Vars, Written By The App Itself Rather Than Pasted Manually
+
+**Date**
+
+2026-09-03
+
+**Status**
+
+Accepted
+
+### Context
+
+A third live voice transcript in one night flagged the same dead-end fallback (`_voice_booking_alternative`'s fixed decline line), this time blocking the core booking function itself. Traced with real evidence, not assumed: a scripted hot-lead conversation driven through the actual production `/chat` endpoint (qualifying fast — name, company, email, budget, urgent timeline, a buying-signal ask to book a demo) reached `drive_to_booking` and got the raw Calendly fallback link instead of real numbered slots, confirming Google Calendar was disconnected on production, not merely suspected to be.
+
+Root cause: `scheduling/calendar_tokens.db` shares the exact wipe-on-deploy gap Decision #024/`b07ec45` already fixed for `BUSINESS_API_KEYS` — excluded from both `.gitignore` and `.dockerignore`, and Render (free plan, no `render.yaml`) has no persistent disk, so the file resets on every deploy. It was never covered by that earlier fix, which named only API keys.
+
+Unlike an API key, a calendar refresh_token can't be provisioned ahead of time and pasted into Render's dashboard the way `BUSINESS_API_KEYS`/`ADMIN_PASSWORD`/`GROQ_API_KEY` are — it only comes into existence after a real business owner completes Google's OAuth consent screen via `/oauth/google/connect`, an interactive flow with no equivalent to `scripts/generate_api_key.py` running ahead of a deploy.
+
+### Decision
+
+`scheduling/render_env_sync.py` (new): immediately after a successful `handle_oauth_callback`, the app itself writes the business's refresh_token into a `GOOGLE_CALENDAR_REFRESH_TOKENS` env var on Render, via Render's own API, using a new app-held `RENDER_API_KEY` secret. `GoogleCalendarProvider.is_connected()` and `_load_credentials()` both check that env var first, before ever touching the local SQLite row, so a business reconnected after this ships stays reported connected on a brand-new process where `calendar_tokens.db` has just been wiped. The local file is still written on every save as a same-process cache; it is no longer the source of truth for whether a connection survives a deploy.
+
+Only the refresh_token is persisted this way, never the short-lived access token or its expiry: a normal `google-auth` `refresh()` call does not rotate it (Google returns the same one for the life of the grant), so it is the one value that is both durable and cheap to keep in sync — a fresh access token is always re-derived from it with one real call to Google after a redeploy, rather than caching a second value that would just go stale the same way.
+
+Render's env-var API is bulk-replace only (confirmed by `scripts/generate_api_key.py`'s own `--merge-with` dance, built for the identical reason), so the write reads every existing env var first and puts the complete set back with only that one key changed, never touching anything else.
+
+### Reasoning
+
+An automatic, app-driven write was chosen over the `BUSINESS_API_KEYS` precedent's fully manual "print it, paste it into Render, redeploy" step, because that step requires the value to exist *before* the OAuth handshake that produces it — it doesn't, until a real consent flow completes at runtime. The alternative of provisioning a real persistent store (Postgres/Key-Value) was set aside as new billed infrastructure not to create unilaterally; a hybrid where the app calls Render's API directly was accepted as the option that keeps the existing self-serve `/oauth/google/connect` UX fully automatic, at the cost of one new app-held secret with permission to modify the service's own configuration.
+
+Never raises past `handle_oauth_callback`: this is a durability improvement layered on a connection that already works for the rest of the process's life regardless of whether the Render write succeeds. A missing `RENDER_API_KEY` or a network blip is logged loudly (`print()` + `Logger()`, matching the stdout-only-Logs-view discipline already established for Render) and just means the connection needs to be redone after the next redeploy — exactly the pre-fix behavior, not a new failure mode.
+
+Setting `RENDER_API_KEY` itself was deliberately done by the founder directly through Render's dashboard, not by an agent call to the bulk-replace API — there is no read-only way to fetch the current full env var list first, so a single-key write attempted through the bulk endpoint risked silently wiping every other production secret (`GROQ_API_KEY`, `ADMIN_USERNAME`/`PASSWORD`, `GOOGLE_CLIENT_ID`/`SECRET`, `BUSINESS_API_KEYS`) with no way to recover them. Render's own dashboard UI performs a real single-key upsert and carries none of that risk.
+
+### Verification
+
+Confirmed against real production behavior at every step, not assumed from either the code or a status label:
+
+- **Before the fix**: the scripted hot-lead `/chat` conversation returned the raw Calendly fallback link, not real slots — proof of disconnection, not inference from `is_connected()`'s own row-check.
+- **After `RENDER_API_KEY` was set and the calendar reconnected**: the same scripted conversation returned genuine numbered slots (`1. Friday 9:00 AM – 9:30 AM`, etc.).
+- **The actual claim under test — survives a redeploy**: a fresh deploy was triggered directly (not waited for), confirmed live via `get_deploy` (status `live`, real `finishedAt` timestamp) and independently via a live `GET /health` call. The same scripted conversation was run again immediately after — real numbered slots were still returned, proving the connection survived the exact wipe mechanism that caused the original incident, rather than merely appearing to.
+- Two earlier reconnect attempts failed silently before this succeeded, for an ordering reason worth recording: `RENDER_API_KEY` must be live *before* the OAuth connect click, or `persist_calendar_refresh_token` has nothing to authenticate with and fails closed (logged, not raised) — a business reconnecting during that window has to reconnect again once the key is confirmed live.
+- Every synthetic lead created by this verification's scripted conversations was deleted through the existing admin delete-lead flow afterward, each confirmed gone via a subsequent `404`, not assumed removed.
+
+### Consequences
+
+**Benefits**
+- Calendar connections now survive a Render redeploy automatically, closing the actual root cause behind three separate live-transcript incidents in one night, verified against a real forced redeploy rather than trusted on code-reading alone
+- The existing self-serve `/oauth/google/connect` flow is unchanged from a business owner's perspective — no manual token copy-paste step was added to it
+- `full test suite`: 665 passed (645 → 665, 20 new), 2 skipped, zero regressions
+
+**Trade-offs**
+- A new secret, `RENDER_API_KEY`, now lives in the running app with permission to modify the service's own environment configuration — a larger blast radius than any secret this app has held before (`GOOGLE_CLIENT_SECRET`, `BUSINESS_API_KEYS`, etc. can only authenticate as themselves, not reconfigure the service)
+- Every calendar connect/reconnect now triggers an additional Render redeploy (the env-var write itself), a brief availability blip that a purely local SQLite write never caused
+- The single-shared-Google-OAuth-app limitation `CalendarTokenStore` already documented is unchanged by this decision — still one Cloud OAuth app for every business, not per-business isolation
+
+---
+
 \---
 
 
