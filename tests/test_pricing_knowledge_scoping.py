@@ -40,10 +40,10 @@ class TestPricingKnowledgeScoping(unittest.TestCase):
         self.assertNotIn("Internal_Pricing_Reference", self.kb.documents)
 
         for content in self.kb.documents.values():
-            self.assertNotIn("997", content)
-            self.assertNotIn("1,497", content)
-            self.assertNotIn("2,497", content)
-            self.assertNotIn("1,997", content)
+            self.assertNotIn("5,000", content)
+            self.assertNotIn("7,500", content)
+            self.assertNotIn("15,000", content)
+            self.assertNotIn("25,000", content)
 
     def test_internal_pricing_reference_file_exists_outside_knowledge(self):
         internal_ref = Path(__file__).resolve().parent.parent / "docs" / "Internal_Pricing_Reference.md"
@@ -55,7 +55,7 @@ class TestPricingKnowledgeScoping(unittest.TestCase):
         # Sanity: the real numbers do live here, just not anywhere
         # KnowledgeBase can reach.
         content = internal_ref.read_text(encoding="utf-8")
-        self.assertIn("$997", content)
+        self.assertIn("$15,000", content)
 
 
 class TestApprovedShorthandRangeStripping(unittest.TestCase):

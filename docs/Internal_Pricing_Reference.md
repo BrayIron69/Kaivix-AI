@@ -13,36 +13,29 @@ calls once a visitor has been qualified.
 
 ## AI Employee — Lead Qualification Agent
 
-- Setup fee: $997 one-time (non-refundable once development starts)
-- Monthly retainer: $497/month (hosting, monitoring, maintenance, updates)
+- Setup fee: $5,000-7,500 one-time (non-refundable once development starts)
+- Monthly retainer: $300-500/month (hosting, monitoring, maintenance, updates)
 
 ---
 
 ## AI Employee — Customer Support Agent
 
-- Setup fee: $1,497 one-time
-- Monthly retainer: $597/month
+- Setup fee: $15,000 one-time
+- Monthly retainer: $750/month
 
 ---
 
 ## Voice AI Agent
 
-- Setup fee: $2,497 one-time
-- Monthly retainer: $797/month
+- Setup fee: $25,000 one-time
+- Monthly retainer: $1,200/month
 
 ---
 
 ## Custom AI Software
 
-- Quoted individually based on scope
-- Starts from $1,997 setup
-
----
-
-## Founding Client Discount
-
-Currently offered to the first two clients:
-- $697 setup + $297/month in exchange for a testimonial and case study.
+- Quoted individually based on scope, no starting figure — this tier is
+  scoped case-by-case and often exceeds the Voice AI Agent price
 
 ---
 
@@ -59,3 +52,9 @@ Currently offered to the first two clients:
   as part of the fix that stopped Bray from quoting exact prices to
   unqualified visitors.
 - Update this file, not `pricing.md`, when real prices change.
+- 2026-09: setup fees repriced ($997/$1,497/$2,497 -> $5,000-7,500/$15,000/
+  $25,000) to match Kaivix's current positioning. Retainers estimated
+  proportionally to each tier's build complexity, not pulled from a
+  competitor survey -- sanity-check them against actual hosting/support
+  cost before quoting. Founding Client Discount removed: it was scoped to
+  "the first two clients" and Kaivix now has three real clients.
