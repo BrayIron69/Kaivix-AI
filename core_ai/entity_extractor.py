@@ -123,6 +123,25 @@ class EntityExtractor:
         (r"\bwe work at\s+([^.,!?]+)", _COMPANY_KIND_NAME),
 
         (r"\bmy business is\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+
+        # Self-introduction by name AND company in one breath -- "I'm
+        # Dana from Verify Dental Group", "this is Dana from Acme". The
+        # single most natural way a person introduces themselves, and on
+        # a phone call very close to the only way. It was missing
+        # entirely, so a visitor who introduced themselves perfectly had
+        # no company captured, stayed un-qualified, and (since a
+        # qualified lead is what triggers the close) never got asked for
+        # the meeting. Found by running a real qualified-lead
+        # conversation through live production and reading the CRM row
+        # it produced, not by inspection.
+        #
+        # At least one word is REQUIRED between the pronoun and "from",
+        # which is what keeps "I'm from Boston" -- a location, not an
+        # employer -- out of the company field.
+        (r"\bi(?:'m|\s+am)\s+\w+(?:\s+\w+)?\s+from\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bthis is\s+\w+(?:\s+\w+)?\s+from\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bcalling from\s+([^.,!?]+)", _COMPANY_KIND_NAME),
+        (r"\bi work for\s+([^.,!?]+)", _COMPANY_KIND_NAME),
     ]
 
     # Descriptive continuations that only ever follow a business type,
