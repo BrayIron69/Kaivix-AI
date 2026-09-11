@@ -212,7 +212,11 @@ class TestBookingResolutionGatedByEnabledTools(_BookingEngineMixin, unittest.Tes
 
         self.assertEqual(
             result,
-            {"confirmation": "Wednesday 10:00 AM - 11:00 AM", "failed": False},
+            {
+                "confirmation": "Wednesday 10:00 AM - 11:00 AM",
+                "failed": False,
+                "invite_sent_to": "alice@example.com",
+            },
         )
         self.engine.calendar_provider.create_event.assert_called_once()
 

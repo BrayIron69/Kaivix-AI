@@ -280,9 +280,26 @@ RULES:
                     "friendly words — the way a real person would say it, not a system "
                     "message. You must state the confirmed time correctly and exactly as "
                     "given above, but do not copy this label format or this instruction's "
-                    "sentence structure into your reply. Mention that a calendar invite/"
-                    "confirmation will be sent to their email.",
+                    "sentence structure into your reply.",
                 ]
+
+                # Only promise the invite when Google was actually given
+                # somebody to invite. It notifies attendees and nothing
+                # else, so an event created without one means nobody was
+                # told -- and a real booking went out exactly that way
+                # while Bray said an invite was on its way.
+                invite_recipient = getattr(plan, "booking_invite_sent_to", "") or ""
+                if invite_recipient:
+                    sections.append(
+                        f"A calendar invitation has genuinely been sent to "
+                        f"{invite_recipient}, so you may say so."
+                    )
+                else:
+                    sections.append(
+                        "No calendar invitation was sent, because no email address "
+                        "is on file for this visitor. Do NOT say an invite is coming. "
+                        "Ask for their email address so you can get one to them."
+                    )
 
             # The ONLY thing in this prompt that authorises Bray to say
             # an action was performed. Rule 12 forbids claiming any

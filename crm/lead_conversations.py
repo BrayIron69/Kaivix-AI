@@ -93,6 +93,44 @@ class LeadConversationLinks:
 
         return [row["conversation_id"] for row in rows]
 
+    def email_for_conversation(
+        self, conversation_id: str, business_id: str = DEFAULT_BUSINESS_ID
+    ) -> str | None:
+        """
+        Which lead this conversation belongs to -- the reverse of
+        conversation_ids_for, and the piece that lets a restarted
+        process work out WHO it is talking to.
+
+        ConversationEngine holds lead profiles in memory keyed by
+        conversation_id, so a restart leaves it with a blank profile and
+        no email, and LongTermMemory.hydrate (which keys on email)
+        returns immediately without recovering anything. This lookup is
+        what re-establishes the identity so the existing hydration can
+        run. See ConversationEngine._get_lead.
+
+        Returns None for a conversation with no linked lead, which is
+        the normal state before a visitor has given an email: there is
+        no durable identity to recover yet, and inventing one would be
+        worse than starting fresh.
+        """
+        if not conversation_id:
+            return None
+
+        conn = get_connection()
+        row = conn.execute(
+            """
+            SELECT email
+            FROM lead_conversations
+            WHERE business_id = ? AND conversation_id = ?
+            ORDER BY first_seen DESC
+            LIMIT 1
+            """,
+            (business_id, conversation_id),
+        ).fetchone()
+        conn.close()
+
+        return row["email"] if row else None
+
     def delete_for(
         self, email: str, business_id: str = DEFAULT_BUSINESS_ID
     ) -> None:

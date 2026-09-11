@@ -99,7 +99,17 @@ class TestMaybeResolveBooking(_IsolatedDatabasesMixin, unittest.TestCase):
             "conv-1", "2", self.lead, self.working_memory
         )
 
-        self.assertEqual(result, {"confirmation": "Wednesday 10:00 AM - 11:00 AM", "failed": False})
+        # invite_sent_to records the address Google was actually given as
+        # an attendee, so Bray only promises an invite that really went
+        # out -- see ConversationPlan.booking_invite_sent_to.
+        self.assertEqual(
+            result,
+            {
+                "confirmation": "Wednesday 10:00 AM - 11:00 AM",
+                "failed": False,
+                "invite_sent_to": "alice@example.com",
+            },
+        )
         self.assertEqual(self.working_memory.offered_slots, [])
         self.assertNotIn("conv-1", self.engine._offered_slot_windows)
 

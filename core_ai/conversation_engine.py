@@ -36,7 +36,12 @@ from services.lead_service import LeadService
 from tools.email_tool import SendOverviewEmailTool
 from tools.factual_lookup_tool import FactualLookupTool
 from tools.registry import ToolRegistry
-from utils.logger import Logger, conversation_bodies_enabled, redact_free_text
+from utils.logger import (
+    Logger,
+    conversation_bodies_enabled,
+    lead_reference,
+    redact_free_text,
+)
 
 
 class ConversationEngine:
@@ -402,6 +407,7 @@ class ConversationEngine:
                 plan,
                 booking_confirmation=booking_result["confirmation"],
                 booking_failed=booking_result["failed"],
+                booking_invite_sent_to=booking_result.get("invite_sent_to", ""),
             )
         else:
             # Read-only: attaches real calendar availability to the plan
@@ -531,10 +537,76 @@ class ConversationEngine:
     # ------------------------------------------------------------------
 
     def _get_lead(self, conversation_id: str) -> LeadProfile:
-        """Return the active lead profile for this conversation."""
+        """
+        Return the active lead profile for this conversation, rebuilding
+        it from durable storage when this process has never seen the
+        conversation before.
+
+        _lead_profiles is an in-memory cache, so a restart, a deploy, or
+        Render's free-tier idle spin-down used to leave a mid-conversation
+        visitor with a blank profile. That was not a cosmetic memory
+        gap. Conversation TRANSCRIPTS are durable (Postgres), so the
+        model kept talking as though it remembered the person, while
+        every deterministic Python path saw an empty lead -- measured in
+        production, where a real booking was created with NO attendee
+        and the title "Kaivix Demo Call - ", after Bray had told the
+        visitor an invite was on its way. The model's apparent memory
+        and the system's actual state had silently diverged.
+
+        Recovery is identity-first: the one thing that cannot be
+        re-derived is WHO this conversation belongs to, and
+        LongTermMemory.hydrate keys on email, so it returns immediately
+        on a blank profile and recovers nothing. Reading the email back
+        from the lead-conversation link re-establishes that identity,
+        and the existing hydration in _update_lead_profile then refills
+        the rest from long-term memory as it always did. No second
+        rehydration path, and no new copy of the profile to keep in
+        sync.
+
+        Never raises: a lookup failure means starting fresh, which is
+        exactly today's behaviour, and is far better than dropping the
+        turn.
+        """
         if conversation_id not in self._lead_profiles:
-            self._lead_profiles[conversation_id] = LeadProfile()
+            lead = LeadProfile()
+            self._lead_profiles[conversation_id] = lead
+            self._restore_lead_identity(conversation_id, lead)
+
         return self._lead_profiles[conversation_id]
+
+    def _restore_lead_identity(self, conversation_id: str, lead: LeadProfile) -> None:
+        """
+        Seed a freshly-created profile with the email this conversation
+        is already known to belong to, if any.
+
+        Deliberately sets ONLY the email. Everything else is left to the
+        hydration that already runs every turn, so there is one place
+        that knows how to merge a stored profile onto a live lead
+        (LongTermMemory.apply_to_lead, with its only-fill-empty
+        semantics) rather than two that can disagree.
+        """
+        try:
+            email = self.lead_conversation_links.email_for_conversation(
+                conversation_id, business_id=self.business_id
+            )
+        except Exception as error:
+            self.logger.error(
+                f"[LeadProfile] Could not look up the lead behind "
+                f"conversation_id={conversation_id}: "
+                f"{type(error).__name__}: {error}"
+            )
+            return
+
+        if not email:
+            return
+
+        lead.email = email
+        self.logger.info(
+            f"[LeadProfile] Recovered identity for a conversation this "
+            f"process had not seen (conversation_id={conversation_id}, "
+            f"business_id={self.business_id!r}, "
+            f"ref={lead_reference(self.business_id, email)})"
+        )
 
     def _get_working_memory(self, conversation_id: str) -> WorkingMemory:
         """
@@ -1492,9 +1564,18 @@ class ConversationEngine:
 
             start_time, end_time = windows[matched_index]
 
+            # No trailing " - " when there is nobody to name. A real
+            # booking went onto a real calendar titled "Kaivix Demo
+            # Call - " because this interpolated an empty lead; the
+            # identity recovery in _get_lead is the fix for WHY it was
+            # empty, and this is so the title is never malformed even
+            # when it genuinely is.
+            who = (lead.name or lead.email or "").strip()
+            summary = f"Kaivix Demo Call - {who}" if who else "Kaivix Demo Call"
+
             result = self.calendar_provider.create_event(
                 self.business_id,
-                summary=f"Kaivix Demo Call - {lead.name or lead.email}",
+                summary=summary,
                 start_time=start_time,
                 end_time=end_time,
                 attendee_email=lead.email,
@@ -1504,7 +1585,20 @@ class ConversationEngine:
             self._offered_slot_windows.pop(conversation_id, None)
 
             if result.get("success"):
-                return {"confirmation": matched_slot_text, "failed": False}
+                # Whether Google actually had an attendee to invite.
+                # create_event only attaches one when attendee_email is
+                # truthy, and Google only emails attendees -- so with an
+                # empty lead the event is created and NOBODY is
+                # notified. Bray said "I'll send a calendar invitation
+                # to <address>" in exactly that situation, which is a
+                # false claim of the same kind rule 12 exists to
+                # prevent. PromptBuilder now only offers the invite line
+                # when this is true.
+                return {
+                    "confirmation": matched_slot_text,
+                    "failed": False,
+                    "invite_sent_to": lead.email or "",
+                }
 
             self.logger.error(
                 f"[GoogleCalendarProvider] Booking attempt failed "

@@ -92,6 +92,33 @@ class PostgresLeadConversationLinks:
 
         return [row["conversation_id"] for row in rows]
 
+    def email_for_conversation(
+        self, conversation_id: str, business_id: str = DEFAULT_BUSINESS_ID
+    ) -> str | None:
+        """
+        Reverse lookup: which lead this conversation belongs to. See the
+        SQLite twin's docstring for why a restarted process needs it.
+        """
+        if not conversation_id:
+            return None
+
+        conn = postgres.get_connection()
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT email
+                FROM lead_conversations
+                WHERE business_id = %s AND conversation_id = %s
+                ORDER BY first_seen DESC
+                LIMIT 1
+                """,
+                (business_id, conversation_id),
+            )
+            row = cursor.fetchone()
+        conn.close()
+
+        return row["email"] if row else None
+
     def delete_for(self, email: str, business_id: str = DEFAULT_BUSINESS_ID) -> None:
         """
         Drops the pointers only. Clearing the conversation CONTENT is

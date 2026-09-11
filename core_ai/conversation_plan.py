@@ -52,6 +52,18 @@ class ConversationPlan:
     # same time as a non-empty booking_confirmation.
     booking_failed: bool = False
 
+    # The address Google was actually given as an attendee on the
+    # just-created event, or empty when there was none. Set only by
+    # _maybe_resolve_booking, alongside booking_confirmation.
+    #
+    # Google only notifies attendees, so an event created with none
+    # means nobody was told. Bray previously promised "a calendar invite
+    # will be sent to your email" on every confirmation regardless --
+    # observed in production creating a real booking with no attendee
+    # and promising an invite anyway. PromptBuilder offers that line
+    # only when this is non-empty.
+    booking_invite_sent_to: str = ""
+
     # A tool PlanningEngine has deterministically decided should run
     # this turn, as {"name": str, "args": dict}, or None. PlanningEngine
     # only ever RECORDS the request -- it performs no I/O, same as it
