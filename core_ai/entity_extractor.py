@@ -21,7 +21,9 @@ class EntityExtractor:
     )
 
     BUDGET_PATTERN = re.compile(
-        r"(\$ ?[\d,]+(?:\.\d+)?(?:\s*/\s*month)?|\d+\s*(?:usd|dollars|pkr|rs))",
+        r"(\$ ?[\d,]+(?:\.\d+)?(?:\s*[km])?(?:\s*/\s*month)?"
+        r"|[\d,]+(?:\.\d+)?\s*[km]\b"
+        r"|\d+\s*(?:usd|dollars|pkr|rs))",
         re.IGNORECASE,
     )
 
