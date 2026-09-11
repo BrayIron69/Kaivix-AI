@@ -45,9 +45,11 @@ def _ensure_builtins_registered() -> None:
     if _builtins_loaded:
         return
 
+    from crm.postgres_crm import PostgresCRM
     from crm.sqlite_crm import SQLiteCRM
 
     register_crm_provider("sqlite", SQLiteCRM)
+    register_crm_provider("postgres", PostgresCRM)
     _builtins_loaded = True
 
 
@@ -68,6 +70,36 @@ def get_crm_provider_class(name: str) -> type[BaseCRM]:
     return _REGISTRY[key]
 
 
+INTERNAL_PROVIDER = "internal"
+
+
 def get_crm_provider(name: str) -> BaseCRM:
-    """Build the CRM named in business_config.providers.crm_provider."""
-    return get_crm_provider_class(name)()
+    """
+    Build the CRM named in business_config.providers.crm_provider.
+
+    "internal" means "this codebase's own database" and resolves to
+    postgres when DATABASE_URL is set, sqlite otherwise.
+
+    That indirection exists because sqlite-vs-postgres is NOT a
+    per-business choice, and providers.yaml is one committed file shared
+    by local development, the test suite and production. Naming
+    "postgres" there directly would mean every developer and every test
+    run needed a live database to construct an engine at all. A genuine
+    per-business choice is "our own database" versus an external system
+    like HubSpot -- which is exactly what this field still expresses.
+
+    This is NOT the silent fallback UnknownCRMProviderError exists to
+    prevent. An unknown name is still fatal; "sqlite" and "postgres"
+    remain available to pin a backend explicitly; and the resolved
+    choice is logged loudly at construction by database/postgres.py,
+    because "which database is this actually writing to" is precisely
+    the question nobody asks until data has already gone missing.
+    """
+    key = (name or "").strip().lower()
+
+    if key == INTERNAL_PROVIDER:
+        from database import postgres
+
+        key = "postgres" if postgres.is_configured() else "sqlite"
+
+    return get_crm_provider_class(key)()

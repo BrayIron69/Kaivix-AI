@@ -16,6 +16,12 @@ google-api-python-client>=2.126.0
 # google-auth's dependencies must not silently remove it.
 requests>=2.31.0
 
+# Postgres driver for the persistent lead/conversation/profile stores
+# (database/postgres.py). psycopg 3 rather than psycopg2-binary: it
+# ships wheels for current Python versions, where psycopg2-binary
+# lags.
+psycopg[binary]>=3.1
+
 # Nothing imports "tzdata" by name -- stdlib zoneinfo reads it. Required
 # wherever the OS ships no IANA tz database (Windows has none: TZPATH is
 # empty), or ZoneInfo() raises ZoneInfoNotFoundError. Needed by

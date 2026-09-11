@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from core_ai.business_config import DEFAULT_BUSINESS_ID
-from crm.lead_conversations import LeadConversationLinks
+from crm.lead_conversations import get_lead_conversation_links
 from memory.conversation_memory import ConversationMemory
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -89,7 +89,7 @@ router = APIRouter(
 )
 
 lead_service = LeadService()
-lead_conversation_links = LeadConversationLinks()
+lead_conversation_links = get_lead_conversation_links()
 
 
 # --------------------------------------------------

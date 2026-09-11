@@ -114,3 +114,28 @@ class LeadConversationLinks:
         )
         conn.commit()
         conn.close()
+
+
+def get_lead_conversation_links():
+    """
+    The link store this deployment should use.
+
+    Postgres when DATABASE_URL is set, SQLite otherwise. Chosen here
+    rather than by a providers.yaml field because this is deployment
+    infrastructure, not a per-business choice: crm_provider says where a
+    given business's LEADS go (and could reasonably be hubspot for one
+    business and postgres for another), while this table is part of this
+    codebase's own storage and follows the deployment.
+
+    An explicit factory rather than dispatch inside the class, so the
+    two implementations stay separately readable and a caller can still
+    construct either one directly in a test.
+    """
+    from database import postgres
+
+    if postgres.is_configured():
+        from crm.postgres_lead_conversations import PostgresLeadConversationLinks
+
+        return PostgresLeadConversationLinks()
+
+    return LeadConversationLinks()

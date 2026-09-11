@@ -282,10 +282,36 @@ class TestKaivixBehaviourUnchanged(unittest.TestCase):
     before.
     """
 
-    def test_kaivix_config_still_declares_groq_and_sqlite(self):
+    def test_kaivix_config_still_declares_groq_and_an_internal_crm(self):
+        """
+        crm_provider became "internal" when leads moved to Postgres:
+        sqlite-vs-postgres is deployment infrastructure, not a
+        per-business choice, and providers.yaml is one committed file
+        shared by local dev, this suite and production. The requirement
+        this test protects is unchanged -- with no DATABASE_URL, Kaivix
+        still resolves to exactly the class that used to be hardcoded,
+        which test_default_engine_uses_the_previously_hardcoded_classes
+        below asserts directly.
+        """
         providers = BusinessConfigRepository().load(DEFAULT_BUSINESS_ID).providers
         self.assertEqual(providers.llm_provider, "groq")
-        self.assertEqual(providers.crm_provider, "sqlite")
+        self.assertEqual(providers.crm_provider, "internal")
+
+    def test_internal_resolves_by_whether_a_real_database_is_configured(self):
+        from unittest.mock import patch
+
+        from crm.postgres_crm import PostgresCRM
+        from crm.registry import get_crm_provider
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsInstance(get_crm_provider("internal"), SQLiteCRM)
+
+        # Constructing PostgresCRM connects, so only the resolution is
+        # checked here; the real round trip lives in
+        # tests/test_crm_contract.py against the actual instance.
+        with patch.dict("os.environ", {"DATABASE_URL": "postgresql://x/y"}):
+            with patch.object(PostgresCRM, "__init__", return_value=None):
+                self.assertIsInstance(get_crm_provider("internal"), PostgresCRM)
 
     def test_default_engine_uses_the_previously_hardcoded_classes(self):
         engine = ConversationEngine()

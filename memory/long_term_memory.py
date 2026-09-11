@@ -236,6 +236,25 @@ class SQLiteLongTermMemoryStore(BaseLongTermMemoryStore):
         return profile
 
 
+def _default_long_term_store() -> BaseLongTermMemoryStore:
+    """
+    Postgres when DATABASE_URL is set, SQLite otherwise -- same
+    deployment-follows-the-environment rule as ConversationMemory's
+    _default_store, documented there.
+
+    Imported lazily so memory.postgres_long_term_memory, which imports
+    from THIS module, does not create a circular import at module load.
+    """
+    from database import postgres
+
+    if postgres.is_configured():
+        from memory.postgres_long_term_memory import PostgresLongTermMemoryStore
+
+        return PostgresLongTermMemoryStore()
+
+    return SQLiteLongTermMemoryStore()
+
+
 class LongTermMemory:
     """
     LongTermMemory
@@ -289,7 +308,7 @@ class LongTermMemory:
     _LIST_LEAD_FIELDS = ("pain_points", "objections", "buying_signals")
 
     def __init__(self, store: BaseLongTermMemoryStore | None = None):
-        self.store = store or SQLiteLongTermMemoryStore()
+        self.store = store or _default_long_term_store()
 
     # ------------------------------------------------------------------
     # Public API

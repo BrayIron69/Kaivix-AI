@@ -23,7 +23,7 @@ from core_ai.lead_intelligence_engine import LeadIntelligenceEngine
 from core_ai.memory_manager import MemoryManager
 from core_ai.planning_engine import PlanningEngine
 from core_ai.pricing_guard import PRICE_DEFLECTION_RESPONSE, find_unapproved_figures
-from crm.lead_conversations import LeadConversationLinks
+from crm.lead_conversations import get_lead_conversation_links
 from core_ai.prompt_builder import PromptBuilder
 from core_ai.qualification_engine import QualificationEngine
 from core_ai.stages import ConversationStage
@@ -188,7 +188,7 @@ class ConversationEngine:
         # Full lead-to-conversations history, alongside the single
         # latest conversation leads.conversation_id holds -- see
         # crm/lead_conversations.py.
-        self.lead_conversation_links = LeadConversationLinks()
+        self.lead_conversation_links = get_lead_conversation_links()
         self.calendar_provider = GoogleCalendarProvider()
         # Reuses the same Google connection calendar_provider does --
         # see scheduling/email_provider.py's docstring. Not gated by
