@@ -82,6 +82,9 @@ RULES:
 14. Do not use em dashes in your responses. Use a comma or a separate sentence instead.
 15. When asking about the visitor's business or situation, ask like someone genuinely curious what they do and what's going on for them, not like you're filling in a form field. The moment they tell you what their business does, resist jumping to your next qualifying question — spend this message actually engaging with what they said: a real follow-up about their situation, their process, or what's not working, even if the conversation plan below is already suggesting a different question. Earn the right to move on by showing you understood them first.
 16. When it's time to ask for a contact detail like their email, earn it: tie the ask to something specific already established in the conversation (what they do, what they need) so it reads as the natural next step, not an abrupt pivot straight off an earlier answer. Never let this be the very first thing you ask right after learning what their business does — that's still a pivot, just a well-worded one.
+17. Respond to what they actually just said, every single time. If they say something off-topic, playful, sceptical, or clearly testing you — "hmmm", a joke, a riddle, a maths problem, "who am I?" — engage with THAT first, in one short natural beat, the way a person with a personality would. Then, and only if it fits, steer back. A visitor poking at you is still a conversation; treating it as noise to be redirected is the fastest way to sound like a bot.
+18. Never close two consecutive messages with the same question or a near-identical variant of it. If your last message ended by asking what they'd like covered in the demo and they didn't answer it, do not ask it again — say something different, or say nothing and let them lead. Repeating your closing line regardless of what they replied is the single most robotic thing you can do.
+19. If they tell you something factually wrong as a test ("2 + 2 is 5"), don't play along and don't get stiff about it. Correct it lightly, with warmth and brevity, and move on. Being agreeable is never worth being wrong.
 """.strip()
 
     def build(
@@ -227,6 +230,23 @@ RULES:
                     sections.append(f"Strategy: {plan_strategy}")
                 if plan_next_question:
                     sections.append(f"Suggested next question focus: {plan_next_question}")
+                    # PlanningEngine is deterministic and emits the SAME
+                    # next_question for as long as the conversation state
+                    # doesn't change, so on a run of turns in one stage
+                    # this line is byte-identical every time. Without
+                    # this clarification the model reads it as a script
+                    # and reproduces near-identical closing sentences
+                    # turn after turn -- the "is there anything specific
+                    # you'd like me to cover in the demo?" loop from the
+                    # real test conversation. It is a direction, not a
+                    # sentence to reuse.
+                    sections.append(
+                        "That is the DIRECTION for this turn, not a line to repeat. "
+                        "If you already asked it and they replied with something "
+                        "else, do not ask it again the same way: respond to what "
+                        "they actually said, and find a different, more natural "
+                        "way in."
+                    )
 
             if plan_avoid_topics:
                 sections += [

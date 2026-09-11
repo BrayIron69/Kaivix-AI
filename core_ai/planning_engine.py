@@ -9,6 +9,7 @@ from core_ai.business_config import (
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.intents import Intent
 from core_ai.stages import ConversationStage
+from tools.factual_lookup_tool import FactualLookupTool
 
 # Shared, process-lifetime repository for the default (Kaivix)
 # BusinessConfig used whenever a caller doesn't pass one explicitly --
@@ -89,6 +90,11 @@ class PlanningEngine:
     # one place alongside the tool's own `name`.
     OVERVIEW_EMAIL_TOOL = "send_overview_email"
 
+    # Answering "what's today's date" mid-conversation. Requested
+    # whenever the visitor asks one, at any stage, since a factual
+    # question is orthogonal to where qualification has got to.
+    FACTUAL_LOOKUP_TOOL = "factual_lookup"
+
     @staticmethod
     def _build_field_questions(business_config) -> dict:
         """
@@ -118,6 +124,7 @@ class PlanningEngine:
         qualification=None,
         history=None,
         working_memory=None,
+        user_message="",
     ) -> ConversationPlan:
         """
         Return a structured ConversationPlan for the current turn.
@@ -143,6 +150,38 @@ class PlanningEngine:
                 `last_assistant_message` is used (instead of re-scanning
                 `history`) to avoid immediately repeating a question.
                 Read-only here — PlanningEngine never writes to it.
+            user_message: This turn's raw visitor message, used only to
+                recognise a simple factual question ("what's today's
+                date"). Optional and defaulting to empty so every
+                existing caller and test keeps working unchanged;
+                without it, factual lookup simply never triggers.
+        """
+        plan = self._select_plan(
+            stage, intent, goal, lead, qualification, history, working_memory
+        )
+
+        # Tool requests are attached AFTER the conversational plan is
+        # chosen, never instead of it. A visitor asking what day it is
+        # has not stopped being mid-qualification, and returning a
+        # special "factual lookup" plan would throw away the strategy
+        # and next question this turn still needs.
+        return self._attach_tool_requests(plan, lead, user_message)
+
+    def _select_plan(
+        self,
+        stage,
+        intent,
+        goal,
+        lead=None,
+        qualification=None,
+        history=None,
+        working_memory=None,
+    ) -> ConversationPlan:
+        """
+        Choose the conversational plan for this turn. Unchanged branch
+        logic, split out from plan() so tool requests can be attached to
+        whatever it returns without every branch having to know about
+        them.
         """
         goal_value = getattr(goal, "value", goal)
         intent_value = getattr(intent, "value", intent)
@@ -166,10 +205,7 @@ class PlanningEngine:
         if stage == ConversationStage.CLOSING or (
             temperature == self.HOT_TEMPERATURE and len(missing_fields) <= 1
         ):
-            return self._attach_overview_email_request(
-                self._plan_closing(goal_value, temperature, score, missing_fields),
-                lead,
-            )
+            return self._plan_closing(goal_value, temperature, score, missing_fields)
 
         # 3. Otherwise, keep collecting missing qualification info.
         if missing_fields:
@@ -198,6 +234,48 @@ class PlanningEngine:
             recommended_action="Address objections before continuing qualification.",
         )
 
+    def _attach_tool_requests(self, plan, lead, user_message) -> ConversationPlan:
+        """
+        Attach at most one tool request to an already-chosen plan.
+
+        Factual lookup is checked first and wins, because it answers
+        something the visitor asked outright this turn, whereas the
+        overview email is something the system decided to do. Answering
+        the question in front of you takes precedence over the follow-up
+        you had planned.
+
+        Records the request only: no send, no network call, nothing
+        checked about deliverability. ConversationEngine does all of
+        that one step later, which is what keeps this engine stateless
+        and I/O-free exactly as its docstring promises.
+        """
+        factual = self._factual_lookup_request(user_message)
+        if factual is not None:
+            return replace(plan, tool_request=factual)
+
+        return self._attach_overview_email_request(plan, lead)
+
+    def _factual_lookup_request(self, user_message):
+        """
+        A factual-lookup request when the visitor asked a simple factual
+        question this turn, else None.
+
+        Restricted to DATE/TIME questions on purpose. Those are the ones
+        FactualLookupTool answers from the clock with no API key and no
+        network call, so they work everywhere, always. Triggering on
+        anything broader would mean routinely requesting a lookup that
+        fails for want of WEB_SEARCH_API_KEY -- a tool that usually
+        declines is worse than one with a narrow, honest scope.
+        """
+        if self.FACTUAL_LOOKUP_TOOL not in self._enabled_tools:
+            return None
+
+        message = (user_message or "").strip()
+        if not message or not FactualLookupTool.is_simple_date_question(message):
+            return None
+
+        return {"name": self.FACTUAL_LOOKUP_TOOL, "args": {"question": message}}
+
     def _attach_overview_email_request(self, plan, lead) -> ConversationPlan:
         """
         Request the follow-up overview email, at the closing moment and
@@ -217,6 +295,9 @@ class PlanningEngine:
         owns the record of what has already been done. This engine stays
         stateless and I/O-free, exactly as its docstring promises.
         """
+        if plan.strategy != "drive_to_booking":
+            return plan
+
         if self.OVERVIEW_EMAIL_TOOL not in self._enabled_tools:
             return plan
 

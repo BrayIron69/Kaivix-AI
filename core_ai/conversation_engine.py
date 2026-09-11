@@ -34,6 +34,7 @@ from scheduling.google_calendar_provider import GoogleCalendarProvider
 from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
 from tools.email_tool import SendOverviewEmailTool
+from tools.factual_lookup_tool import FactualLookupTool
 from tools.registry import ToolRegistry
 from utils.logger import Logger, conversation_bodies_enabled, redact_free_text
 
@@ -203,7 +204,8 @@ class ConversationEngine:
             tools={
                 SendOverviewEmailTool.name: SendOverviewEmailTool(
                     email_provider=self.email_provider, logger=self.logger
-                )
+                ),
+                FactualLookupTool.name: FactualLookupTool(logger=self.logger),
             },
             logger=self.logger,
         )
@@ -387,6 +389,7 @@ class ConversationEngine:
             qualification=qualification["progress"],
             history=history,
             working_memory=working_memory,
+            user_message=user_message,
         )
 
         if booking_result is not None:

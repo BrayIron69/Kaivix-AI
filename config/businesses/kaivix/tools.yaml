@@ -15,3 +15,4 @@
 enabled_tools:
   - calendar_booking
   - send_overview_email
+  - factual_lookup
