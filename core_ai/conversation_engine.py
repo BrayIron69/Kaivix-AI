@@ -4,6 +4,10 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from core_ai.ai_disclosure_detector import AIDisclosureDetector
+from core_ai.booking_claim_guard import (
+    claims_a_booking_happened,
+    states_specific_availability,
+)
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.lead_profile import LeadProfile
@@ -462,6 +466,17 @@ class ConversationEngine:
         # contains an invented price. See core_ai/pricing_guard.py.
         response = self._guard_against_invented_price(conversation_id, response)
 
+        # Deterministic backstop for ENGINE_RULES rule 11. The plan is
+        # the sole authority on what times are real and whether a
+        # booking happened, so a response asserting either while the
+        # plan says otherwise is inventing it. Placed before the
+        # spoken-URL guard below, since its chat fallback deliberately
+        # contains the booking link and that guard is what keeps the
+        # link out of a voice reply.
+        response = self._guard_against_fabricated_scheduling(
+            conversation_id, response, plan, channel, lead
+        )
+
         # Deterministic backstop for a free-generated email "read-back"
         # not actually matching the real stored value -- same reasoning
         # as the price guard immediately above and the URL guard below:
@@ -661,6 +676,99 @@ class ConversationEngine:
     # ------------------------------------------------------------------
     # Garbled email confirmation
     # ------------------------------------------------------------------
+
+    def _guard_against_fabricated_scheduling(
+        self,
+        conversation_id: str,
+        response: str,
+        plan: ConversationPlan,
+        channel: str,
+        lead: LeadProfile,
+    ) -> str:
+        """
+        Deterministic backstop for ENGINE_RULES rule 11, covering the
+        two scheduling fabrications seen in a real test conversation:
+        offering time slots that no calendar ever returned, and claiming
+        a booking succeeded when nothing was booked.
+
+        The plan is the sole authority on both. plan.available_slots is
+        set only by _maybe_attach_availability, from real free/busy
+        windows; plan.booking_confirmation is set only by
+        _maybe_resolve_booking, after create_event actually succeeded.
+        Neither is ever set by PlanningEngine or by the model. So a
+        response asserting either while the corresponding field is empty
+        is, by construction, inventing it.
+
+        Whole-response replacement, same reasoning as
+        _guard_against_invented_price and _guard_against_spoken_url:
+        deleting the invented time leaves the surrounding sentences
+        still built around a meeting that was never arranged, and a
+        half-corrected booking claim is worse than a clean, honest one.
+
+        The booking claim is checked FIRST. A fabricated confirmation is
+        the more damaging of the two -- a visitor who believes a demo is
+        on the calendar will simply not turn up to one that does not
+        exist -- and a response can easily do both at once.
+        """
+        has_real_slots = bool(getattr(plan, "available_slots", None))
+        has_real_booking = bool(getattr(plan, "booking_confirmation", "") or "")
+
+        if not has_real_booking and claims_a_booking_happened(response):
+            self.logger.error(
+                f"[BookingClaimGuard] Blocked a claimed booking that never "
+                f"happened (conversation_id={conversation_id}, "
+                f"business_id={self.business_id!r}): response={response!r}"
+            )
+            return self._honest_booking_fallback(conversation_id, channel, lead)
+
+        # A confirmed booking legitimises stating its time, and by this
+        # point available_slots has deliberately been cleared by
+        # _maybe_resolve_booking -- so without this the confirmation turn
+        # of the real, working flow would be flagged as invented
+        # availability and replaced. Caught by
+        # test_a_real_confirmed_booking_passes_through_untouched, not by
+        # inspection.
+        if has_real_booking:
+            return response
+
+        if not has_real_slots and states_specific_availability(response):
+            self.logger.error(
+                f"[BookingClaimGuard] Blocked invented availability -- no real "
+                f"calendar slots were attached to this turn's plan "
+                f"(conversation_id={conversation_id}, "
+                f"business_id={self.business_id!r}): response={response!r}"
+            )
+            return self._honest_booking_fallback(conversation_id, channel, lead)
+
+        return response
+
+    def _honest_booking_fallback(
+        self, conversation_id: str, channel: str, lead: LeadProfile
+    ) -> str:
+        """
+        What to say instead of an invented time or an invented booking.
+
+        Reuses _voice_booking_alternative for voice rather than defining
+        a second spoken-safe fallback, so there stays exactly one
+        definition of "the honest voice alternative" (see its
+        docstring). Chat gets the real booking link, which is a genuine
+        next step the visitor can act on -- the point is to replace a
+        fabrication with something true and useful, not with a bare
+        refusal.
+        """
+        if channel == "voice":
+            return (
+                "I can't put that in the calendar myself, so I don't want to "
+                "say it's booked when it isn't. "
+                + self._voice_booking_alternative(conversation_id, lead)
+            )
+
+        booking_link = self.business_config.persona.booking_link or ""
+        return (
+            "I don't want to say that's booked when I haven't actually got it "
+            "on the calendar. You can pick a time that genuinely works here and "
+            f"it'll be confirmed straight away: {booking_link}"
+        )
 
     def _guard_against_garbled_email_confirmation(
         self, conversation_id: str, response: str, lead: LeadProfile
