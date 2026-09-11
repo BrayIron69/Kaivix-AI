@@ -144,6 +144,17 @@ class _MultiBusinessMixin(_IsolatedDatabasesMixin):
                 identity_statement=BUSINESS_B_IDENTITY,
                 response_style=SimpleNamespace(max_sentences=2),
                 booking_link=BUSINESS_B_BOOKING_LINK,
+                # Same reasoning as business_name/booking_link above, for
+                # the same reason one milestone later: ConversationEngine
+                # now builds an AIDisclosureDetector from
+                # persona.ai_name on every construction (the surname
+                # check is per-business, not the literal "Bray"), and
+                # BusinessPersona.ai_name is a non-optional field on the
+                # real pydantic model. Deliberately NOT "Bray": a
+                # distinct value here means the cross-business isolation
+                # tests would actually catch one business's agent
+                # identity leaking into another's engine.
+                ai_name="Riley",
             ),
             qualification=SimpleNamespace(
                 fields=[

@@ -205,6 +205,12 @@ class TestConversationEngineCrossBusiness(_IsolatedDatabasesMixin, unittest.Test
                     "You help widget sellers automate their support and fulfillment."
                 ),
                 response_style=SimpleNamespace(max_sentences=2),
+                # BusinessPersona.ai_name is a non-optional field on the
+                # real pydantic model, and ConversationEngine builds a
+                # per-business AIDisclosureDetector from it -- this
+                # fixture was simply incomplete, the same way it was for
+                # business_name/booking_link one milestone earlier.
+                ai_name="Nova",
             ),
             qualification=SimpleNamespace(
                 fields=[

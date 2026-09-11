@@ -3,6 +3,7 @@ from dataclasses import replace
 from typing import Optional
 from urllib.parse import urlparse
 
+from core_ai.ai_disclosure_detector import AIDisclosureDetector
 from core_ai.business_config import BusinessConfigRepository, DEFAULT_BUSINESS_ID
 from core_ai.conversation_plan import ConversationPlan
 from core_ai.lead_profile import LeadProfile
@@ -167,6 +168,12 @@ class ConversationEngine:
         self.planning_engine = PlanningEngine(business_config=self.business_config)
         self.qualification_engine = QualificationEngine(business_config=self.business_config)
         self.unbacked_action_detector = UnbackedActionDetector()
+        # ai_name comes from config rather than the literal "Bray" --
+        # this engine serves more than one business, and the surname
+        # check is built from whatever that business calls its agent.
+        self.ai_disclosure_detector = AIDisclosureDetector(
+            ai_name=self.business_config.persona.ai_name
+        )
         self.prompt_builder = PromptBuilder()
         self.lead_service = LeadService(
             crm_provider=self.business_config.providers.crm_provider
@@ -245,6 +252,22 @@ class ConversationEngine:
 
         history = self._record_user_message(conversation_id, user_message)
         lead = self._update_lead_profile(conversation_id, user_message)
+
+        # Highest-priority gate in the pipeline, ahead of even the
+        # unbacked-action gate below: a visitor asking whether they are
+        # talking to an AI gets a Python-owned honest answer, and the
+        # model never gets the chance to answer it differently. See
+        # _disclose_ai_identity for why this is not left to the prompt.
+        ai_disclosure_response = self._maybe_disclose_ai_identity(
+            conversation_id, user_message
+        )
+        if ai_disclosure_response is not None:
+            self.memory.add_assistant_message(conversation_id, ai_disclosure_response)
+            self.logger.info(
+                f"[AIDisclosure] Deterministic disclosure used "
+                f"(conversation_id={conversation_id}, business_id={self.business_id!r})"
+            )
+            return ai_disclosure_response
 
         # Deterministic gate, checked before any classification or LLM
         # work happens: if the visitor is asking for something this
@@ -383,6 +406,18 @@ class ConversationEngine:
         # or returned, so neither the visitor nor conversation history
         # ever sees one. See core_ai/em_dash_filter.py.
         response = strip_em_dashes(response)
+
+        # Deterministic backstop for RULE 0 / the identity statement's
+        # non-negotiable disclosure rule. _maybe_disclose_ai_identity
+        # above already owns the answer whenever the visitor asks
+        # outright; this catches the other direction -- the model
+        # volunteering a human claim in a phrasing no question pattern
+        # anticipated. Same standing as the pricing and spoken-URL
+        # guards: the prompt rule is the first line of defense, this is
+        # the guarantee. Applied before the response is stored or
+        # returned, so neither the visitor nor conversation history ever
+        # contains the claim.
+        response = self._guard_against_false_humanity_claim(conversation_id, response)
 
         # Deterministic backstop for ENGINE_RULES rule #7 / pricing.md's
         # "never invent a price". Same reasoning as the em-dash filter
@@ -649,6 +684,89 @@ class ConversationEngine:
             f"stored_email={lead.email!r}"
         )
         return f"Just to confirm, I have your email as {lead.email}."
+
+    # ------------------------------------------------------------------
+    # AI identity disclosure
+    # ------------------------------------------------------------------
+
+    def _disclose_ai_identity(self) -> str:
+        """
+        The honest answer to "are you an AI?", owned by Python.
+
+        Built from config (persona.ai_name, identity.business_name)
+        rather than hardcoded, since this engine serves more than one
+        business. Discloses first, in the opening clause, then keeps the
+        conversation moving -- a real rep who gets asked this answers it
+        straight and carries on, and a disclosure that kills the
+        conversation would create pressure to weaken it later.
+        """
+        ai_name = self.business_config.persona.ai_name or "I"
+        business_name = self.business_config.identity.business_name
+
+        return (
+            f"I'm an AI, not a human. I'm {ai_name}, the AI assistant for "
+            f"{business_name}, and I can answer questions about what we build, "
+            f"talk through your setup, and get a demo on the calendar. "
+            f"What would be most useful?"
+        )
+
+    def _maybe_disclose_ai_identity(
+        self, conversation_id: str, user_message: str
+    ) -> Optional[str]:
+        """
+        Deterministic gate for "are you an AI?" in any phrasing.
+
+        Returns Python-owned text when AIDisclosureDetector matches, or
+        None when it doesn't (the normal pipeline runs as before, LLM
+        included). Runs before the unbacked-action gate and before any
+        classification or LLM work, because no downstream state can
+        change what the honest answer is.
+
+        Python owns this outright rather than instructing the model,
+        for the same reason pricing_guard.py owns price deflection: a
+        prompt rule is an instruction the model can decline, and this
+        codebase has measured it declining comparable ones. The
+        difference is the cost of a miss. An invented price is a quality
+        bug; telling a prospect a bot is a human, in a sales context,
+        after they asked directly, is the disclosure failure several US
+        states legislate against (California's SB 1001 being the most
+        cited). That cannot rest on a rule the model is free to weigh
+        against "sound human and conversational".
+        """
+        if not self.ai_disclosure_detector.asks_whether_ai(user_message):
+            return None
+
+        return self._disclose_ai_identity()
+
+    def _guard_against_false_humanity_claim(
+        self, conversation_id: str, response: str
+    ) -> str:
+        """
+        Replace any response claiming to be human, or attaching an
+        invented surname to the assistant's name, with the honest
+        disclosure. Logs loudly when it fires.
+
+        A no-op for the overwhelming majority of turns. The whole
+        response is replaced rather than the claim edited out, the same
+        reasoning _guard_against_invented_price and
+        _guard_against_spoken_url already document: removing the phrase
+        leaves the surrounding sentences still built around it, and a
+        half-corrected claim about what you are is worse than a clean,
+        direct answer.
+        """
+        claims_human = self.ai_disclosure_detector.claims_to_be_human(response)
+        claims_surname = self.ai_disclosure_detector.claims_invented_surname(response)
+
+        if not claims_human and not claims_surname:
+            return response
+
+        self.logger.error(
+            f"[AIDisclosureGuard] Blocked a response that misrepresented this "
+            f"assistant as a person (conversation_id={conversation_id}, "
+            f"business_id={self.business_id!r}, claims_human={claims_human}, "
+            f"claims_invented_surname={claims_surname}): response={response!r}"
+        )
+        return self._disclose_ai_identity()
 
     def _guard_against_spoken_url(
         self, conversation_id: str, response: str, channel: str, lead: LeadProfile
