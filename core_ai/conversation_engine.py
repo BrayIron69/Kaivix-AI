@@ -24,7 +24,7 @@ from core_ai.memory_manager import MemoryManager
 from core_ai.planning_engine import PlanningEngine
 from core_ai.pricing_guard import (
     PRICE_DEFLECTION_RESPONSE,
-    figures_stated_by,
+    amounts_stated_by,
     find_unapproved_figures,
 )
 from crm.lead_conversations import get_lead_conversation_links
@@ -760,7 +760,7 @@ class ConversationEngine:
         # reply replaced by the deflection, twice in one real test
         # conversation. Read from stored history rather than only this
         # turn's message, so it still holds several turns later.
-        visitor_stated = figures_stated_by(self.memory.get_conversation(conversation_id))
+        visitor_stated = amounts_stated_by(self.memory.get_conversation(conversation_id))
 
         unapproved = find_unapproved_figures(response, visitor_stated=visitor_stated)
         if not unapproved:

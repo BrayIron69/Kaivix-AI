@@ -98,14 +98,19 @@ def find_unapproved_figures(text: str, visitor_stated=None) -> list[str]:
     test that scans the knowledge base, and the eval's no_price_leak
     check can never disagree about it.
 
-    `visitor_stated` is the set of figures the VISITOR themselves used
-    in this conversation. Repeating a number back to the person who
-    just said it is not inventing a price -- it is the most basic form
-    of listening, and blocking it made Bray unable to acknowledge a
-    stated budget. Measured, not theorised: a visitor saying "our budget
-    is 20000 dollars" had the whole reply replaced by the deflection,
-    twice in one test conversation, because Bray echoed their own
-    number back.
+    `visitor_stated` is the set of money AMOUNTS (as numbers) the
+    VISITOR themselves used in this conversation. Repeating a number
+    back to the person who just said it is not inventing a price -- it
+    is the most basic form of listening, and blocking it made Bray
+    unable to acknowledge a stated budget. Measured, not theorised: a
+    visitor saying "our budget is 20000 dollars" had the whole reply
+    replaced by the deflection, twice in one test conversation, because
+    Bray echoed their own number back.
+
+    Compared by VALUE rather than spelling, which a live conversation
+    forced: the visitor typed "15k", Bray repeated it as "$15,000", and
+    an earlier exact-string version of this allowance missed it and
+    replaced the reply anyway.
 
     This does NOT widen what Bray may claim about KAIVIX's pricing. The
     allowance is per-conversation and derived only from what the visitor
@@ -116,30 +121,92 @@ def find_unapproved_figures(text: str, visitor_stated=None) -> list[str]:
     must stay absolute -- is completely unaffected.
     """
     scrubbed = strip_approved_shorthand_range(text or "")
-    allowed = ALLOWED_DOLLAR_FIGURES | set(visitor_stated or ())
-    return [
-        figure
-        for figure in DOLLAR_PATTERN.findall(scrubbed)
-        if figure not in allowed
-    ]
+    stated_amounts = set(visitor_stated or ())
+
+    unapproved = []
+    for figure in DOLLAR_PATTERN.findall(scrubbed):
+        if figure in ALLOWED_DOLLAR_FIGURES:
+            continue
+        # Compared by VALUE, not spelling: the visitor types "15k" and
+        # the model repeats it as "$15,000".
+        amount = amount_of(figure)
+        if amount is not None and amount in stated_amounts:
+            continue
+        unapproved.append(figure)
+
+    return unapproved
 
 
-def figures_stated_by(messages) -> set:
+# A money amount as a person actually types one: "$15,000", "$15k",
+# "15k", "20000 dollars", or a bare "15000".
+#
+# Comparing SPELLINGS was not enough, which a live conversation showed
+# immediately: the visitor typed "15k", Bray repeated it back as
+# "$15,000", and an exact-match allowance missed it and replaced the
+# whole reply anyway. People state budgets in whatever form they like
+# and the model normalises them, so the comparison has to be on VALUE.
+_MONEY_PATTERN = re.compile(
+    r"(?:\$\s*(?P<dollar>[\d,]*\d)(?P<dollar_suffix>\s*[km])?)"
+    r"|(?:\b(?P<suffixed>[\d,]*\d)\s*(?P<suffix>[km])\b)"
+    r"|(?:\b(?P<worded>[\d,]*\d)\s*(?:dollars|usd)\b)"
+    r"|(?:\b(?P<bare>\d{4,})\b)",
+    re.IGNORECASE,
+)
+
+_MULTIPLIERS = {"k": 1_000, "m": 1_000_000}
+
+
+def _to_amount(digits: str, suffix: str | None) -> int | None:
+    """"15,000" + "k" -> 15000000. None when there is no number at all."""
+    cleaned = (digits or "").replace(",", "").strip()
+    if not cleaned.isdigit():
+        return None
+
+    amount = int(cleaned)
+    key = (suffix or "").strip().lower()
+    return amount * _MULTIPLIERS.get(key, 1)
+
+
+def amount_of(figure: str) -> int | None:
+    """The numeric value of a `$...` figure, for comparison by value."""
+    return _to_amount(re.sub(r"[^\d,]", "", figure or ""), None)
+
+
+def amounts_stated_by(messages) -> set:
     """
-    Dollar figures the visitor has actually used, gathered from their
-    own turns.
+    Money amounts the visitor has actually used, as numbers, gathered
+    from their own turns.
 
     Takes the same {"role", "content"} history ConversationEngine
     already holds, and reads ONLY role="user" entries -- gathering from
     the assistant's turns too would let one invented figure launder
     itself into being permanently allowed for the rest of the
     conversation.
+
+    A bare number needs four digits or more to count, so picking slot
+    "2" never quietly authorises Bray to say "$2", while a real budget
+    written plainly as "15000" still does.
     """
     stated = set()
+
     for message in messages or []:
         if (message or {}).get("role") != "user":
             continue
-        stated.update(DOLLAR_PATTERN.findall(message.get("content") or ""))
+
+        for match in _MONEY_PATTERN.finditer(message.get("content") or ""):
+            groups = match.groupdict()
+            amount = (
+                _to_amount(groups["dollar"], groups["dollar_suffix"])
+                if groups["dollar"]
+                else _to_amount(groups["suffixed"], groups["suffix"])
+                if groups["suffixed"]
+                else _to_amount(groups["worded"], None)
+                if groups["worded"]
+                else _to_amount(groups["bare"], None)
+            )
+            if amount is not None:
+                stated.add(amount)
+
     return stated
 
 
