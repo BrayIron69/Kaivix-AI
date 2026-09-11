@@ -10,6 +10,7 @@ from typing import Optional
 import utils.env  # noqa: F401
 
 from core_ai.business_config import DEFAULT_BUSINESS_ID
+from scheduling import render_env_sync
 from scheduling.calendar_token_store import CalendarTokenStore
 from scheduling.google_calendar_provider import GoogleCalendarProvider, _EXPIRY_REFRESH_MARGIN
 from utils.logger import Logger
@@ -84,6 +85,32 @@ class EmailProvider:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
 
+        # Same durable source GoogleCalendarProvider._load_credentials
+        # reads first, and for the same reason: calendar_tokens.db is
+        # wiped on every Render deploy (no persistent disk), so the
+        # SQLite row below is empty on a fresh process even when the
+        # connection is genuinely live.
+        #
+        # This class did not get that fix when GoogleCalendarProvider
+        # did, because it mirrors that method rather than sharing it
+        # (see the class docstring). The result was that email went
+        # silently dead after every single deploy while the calendar
+        # kept working -- which is why Bray truthfully told a real
+        # visitor it had no way to send an email.
+        env_refresh_token = render_env_sync.load_refresh_token(business_id)
+        if env_refresh_token:
+            credentials = Credentials(
+                token=None,
+                refresh_token=env_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scopes=render_env_sync.load_granted_scopes(business_id) or [],
+                expiry=None,
+            )
+            credentials.refresh(Request())
+            return credentials
+
         stored = self.token_store.load_token(business_id)
         if stored is None:
             return None
@@ -132,7 +159,35 @@ class EmailProvider:
         (what Google's token response actually echoed back) rather than
         assuming the current SCOPES list was granted is what makes this
         accurate for an account that hasn't reconnected yet.
+
+        Checks the durable env-var record first, for the same reason
+        _load_credentials does: after a Render deploy the SQLite row is
+        gone while the connection itself is still live.
+
+        An env entry whose scopes are NOT recorded (the plain-string
+        form written before scopes were persisted) is treated as
+        unknown, and unknown declines. That is deliberately the
+        pessimistic reading: the alternative is offering to send mail
+        this account may never have granted, then failing after
+        promising -- the exact "claim it, then walk it back" pattern
+        that makes an agent untrustworthy. One reconnect through
+        /oauth/google/connect records the scopes and resolves it.
         """
+        env_scopes = render_env_sync.load_granted_scopes(business_id)
+        if env_scopes is not None:
+            return GMAIL_SEND_SCOPE in env_scopes
+
+        if render_env_sync.load_refresh_token(business_id):
+            # A live connection whose granted scopes were never
+            # recorded. Nothing here can honestly answer the question.
+            self.logger.warning(
+                f"[EmailProvider] business_id={business_id!r} has a durable "
+                f"refresh token but no recorded scopes, so gmail.send cannot "
+                f"be confirmed. Reconnect via /oauth/google/connect to record "
+                f"them. Reporting not-connected rather than assuming."
+            )
+            return False
+
         stored = self.token_store.load_token(business_id)
         if stored is None:
             return False

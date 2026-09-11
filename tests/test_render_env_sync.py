@@ -59,7 +59,7 @@ class TestPersistCalendarRefreshTokenSuccess(unittest.TestCase):
         self.assertEqual(sent_pairs["GROQ_API_KEY"], "groq-value")
         self.assertEqual(
             json.loads(sent_pairs[REFRESH_TOKENS_ENV_VAR]),
-            {"kaivix": "new-refresh-token"},
+            {"kaivix": {"refresh_token": "new-refresh-token", "scopes": []}},
         )
 
     def test_merges_into_existing_tokens_without_wiping_other_businesses(self):
@@ -78,9 +78,17 @@ class TestPersistCalendarRefreshTokenSuccess(unittest.TestCase):
             sent_pairs = {item["key"]: item["value"] for item in put_kwargs["json"]}
             merged = json.loads(sent_pairs[REFRESH_TOKENS_ENV_VAR])
 
+            # acme's plain-string entry is preserved verbatim rather
+            # than rewritten: an entry written by an older version of
+            # this function must keep working, since that is exactly
+            # what production holds across the deploy introducing the
+            # object form.
             self.assertEqual(
                 merged,
-                {"acme": "acme-refresh-token", "kaivix": "kaivix-refresh-token"},
+                {
+                    "acme": "acme-refresh-token",
+                    "kaivix": {"refresh_token": "kaivix-refresh-token", "scopes": []},
+                },
             )
 
     def test_malformed_existing_json_is_dropped_not_merged_into(self):
@@ -104,7 +112,7 @@ class TestPersistCalendarRefreshTokenSuccess(unittest.TestCase):
             sent_pairs = {item["key"]: item["value"] for item in put_kwargs["json"]}
             self.assertEqual(
                 json.loads(sent_pairs[REFRESH_TOKENS_ENV_VAR]),
-                {"kaivix": "kaivix-refresh-token"},
+                {"kaivix": {"refresh_token": "kaivix-refresh-token", "scopes": []}},
             )
 
     def test_get_failure_returns_false_and_never_attempts_a_write(self):

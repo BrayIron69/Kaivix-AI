@@ -166,6 +166,10 @@ class TestGoogleCalendarProviderOAuthCallback(unittest.TestCase):
         mock_credentials.refresh_token = "refresh-token"
         mock_credentials.token_uri = "https://oauth2.googleapis.com/token"
         mock_credentials.scopes = SCOPES
+        # What Google actually echoed back, which is what gets
+        # persisted -- a visitor can decline individual scopes on the
+        # consent screen, so this is not necessarily SCOPES.
+        mock_credentials.granted_scopes = SCOPES
         mock_credentials.expiry = datetime(2026, 7, 29, 12, 0, 0)
 
         mock_flow = MagicMock()
@@ -178,7 +182,41 @@ class TestGoogleCalendarProviderOAuthCallback(unittest.TestCase):
             "http://localhost:8000/oauth/google/callback?code=abc123&state=business-a",
         )
 
-        mock_persist.assert_called_once_with("business-a", "refresh-token")
+        mock_persist.assert_called_once_with(
+            "business-a", "refresh-token", scopes=SCOPES
+        )
+
+    @patch("scheduling.render_env_sync.persist_calendar_refresh_token")
+    @patch("google_auth_oauthlib.flow.Flow.from_client_config")
+    def test_persisted_scopes_are_what_google_granted_not_what_was_requested(
+        self, mock_from_client_config, mock_persist
+    ):
+        """
+        A visitor can decline individual scopes on the consent screen.
+        Persisting the SCOPES constant instead of the granted list is
+        how EmailProvider would end up believing it can send mail this
+        account never authorised.
+        """
+        granted = ["https://www.googleapis.com/auth/calendar.events"]
+        mock_credentials = MagicMock()
+        mock_credentials.refresh_token = "refresh-token"
+        mock_credentials.scopes = SCOPES
+        mock_credentials.granted_scopes = granted
+        mock_credentials.expiry = None
+
+        mock_flow = MagicMock()
+        mock_flow.credentials = mock_credentials
+        mock_from_client_config.return_value = mock_flow
+
+        provider = _make_provider(token_store=MagicMock())
+        provider.handle_oauth_callback(
+            "business-a",
+            "http://localhost:8000/oauth/google/callback?code=abc&state=business-a",
+        )
+
+        mock_persist.assert_called_once_with(
+            "business-a", "refresh-token", scopes=granted
+        )
 
     @patch("scheduling.render_env_sync.persist_calendar_refresh_token")
     @patch("google_auth_oauthlib.flow.Flow.from_client_config")

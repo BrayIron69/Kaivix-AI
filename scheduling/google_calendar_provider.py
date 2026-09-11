@@ -382,8 +382,19 @@ class GoogleCalendarProvider(BaseCalendarProvider):
         # needs to be redone after the next redeploy, which is exactly
         # today's behavior, not a regression.
         if flow.credentials.refresh_token:
+            # Scopes come from the credentials Google just returned, not
+            # from the SCOPES constant above: a visitor can decline
+            # individual scopes on the consent screen, and what was
+            # actually granted is the only thing EmailProvider can
+            # honestly act on. Consent time is also the ONLY time this
+            # is knowable -- Credentials.refresh() does not repopulate
+            # granted_scopes (verified against the installed
+            # google-auth, not assumed).
             render_env_sync.persist_calendar_refresh_token(
-                business_id, flow.credentials.refresh_token
+                business_id,
+                flow.credentials.refresh_token,
+                scopes=getattr(flow.credentials, "granted_scopes", None)
+                or flow.credentials.scopes,
             )
 
     def list_calendars(self, business_id: str = DEFAULT_BUSINESS_ID) -> list[dict]:

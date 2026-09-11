@@ -23,7 +23,9 @@ _REQUEST_TIMEOUT_SECONDS = 15
 _ENV_VARS_PAGE_SIZE = 100
 
 
-def persist_calendar_refresh_token(business_id: str, refresh_token: str) -> bool:
+def persist_calendar_refresh_token(
+    business_id: str, refresh_token: str, scopes=None
+) -> bool:
     """
     Best-effort: write business_id's Google Calendar refresh_token into
     Render's GOOGLE_CALENDAR_REFRESH_TOKENS env var, so it survives the
@@ -101,7 +103,26 @@ def persist_calendar_refresh_token(business_id: str, refresh_token: str) -> bool
         return False
 
     existing_tokens = _parse_existing_tokens(current_env_vars.get(REFRESH_TOKENS_ENV_VAR), logger)
-    existing_tokens[business_id] = refresh_token
+
+    # Stored as an object carrying the scopes Google ACTUALLY granted at
+    # consent, not just the token. EmailProvider.is_connected has to know
+    # whether gmail.send was granted, and it cannot find out later:
+    # google-auth's Credentials.refresh() does not populate
+    # granted_scopes from the refresh response (verified against the
+    # installed library, not assumed), so consent time is the only place
+    # this information exists. Assuming the current SCOPES list was
+    # granted is exactly what EmailProvider.is_connected's docstring
+    # already refuses to do, since an account that connected before
+    # gmail.send was added holds a real, usable calendar-only token.
+    #
+    # A plain string stays readable forever (see _entry_refresh_token):
+    # production currently holds one written by the previous version of
+    # this function, and it must keep working rather than silently
+    # disconnecting the calendar on deploy of this change.
+    existing_tokens[business_id] = {
+        "refresh_token": refresh_token,
+        "scopes": list(scopes or []),
+    }
 
     merged_env_vars = dict(current_env_vars)
     merged_env_vars[REFRESH_TOKENS_ENV_VAR] = json.dumps(
@@ -133,14 +154,13 @@ def persist_calendar_refresh_token(business_id: str, refresh_token: str) -> bool
     return True
 
 
-def load_refresh_token(business_id: str) -> str | None:
+def _load_entry(business_id: str):
     """
-    Read business_id's refresh_token back out of
-    GOOGLE_CALENDAR_REFRESH_TOKENS, or None if unset/malformed/absent
-    for this business. Read fresh on every call, never cached at import
-    -- same reasoning require_admin/require_business_api_key already
-    document: a value changed on the host must take effect on the next
-    request, not require a code change.
+    This business's raw entry from GOOGLE_CALENDAR_REFRESH_TOKENS, or
+    None. Read fresh on every call, never cached at import -- same
+    reasoning require_admin/require_business_api_key already document:
+    a value changed on the host must take effect on the next request,
+    not require a code change.
     """
     raw = (os.getenv(REFRESH_TOKENS_ENV_VAR) or "").strip()
     if not raw:
@@ -154,8 +174,56 @@ def load_refresh_token(business_id: str) -> str | None:
     if not isinstance(parsed, dict):
         return None
 
-    token = parsed.get(business_id)
-    return token if isinstance(token, str) and token else None
+    return parsed.get(business_id)
+
+
+def load_refresh_token(business_id: str) -> str | None:
+    """
+    Read business_id's refresh_token back out of
+    GOOGLE_CALENDAR_REFRESH_TOKENS, or None if unset/malformed/absent
+    for this business.
+
+    Accepts BOTH shapes: the plain string this variable originally held,
+    and the {"refresh_token": ..., "scopes": [...]} object it holds
+    going forward. The string form is not legacy cruft to clean up
+    later -- production is holding one right now, and reading it is what
+    keeps the live calendar connected across the deploy that introduces
+    the object form.
+    """
+    entry = _load_entry(business_id)
+
+    if isinstance(entry, str):
+        return entry or None
+
+    if isinstance(entry, dict):
+        token = entry.get("refresh_token")
+        return token if isinstance(token, str) and token else None
+
+    return None
+
+
+def load_granted_scopes(business_id: str):
+    """
+    The scopes Google actually granted for this business's connection,
+    or None when that isn't recorded (an entry written in the plain
+    string form, before scopes were persisted).
+
+    None means "unknown", NOT "none granted", and callers must treat it
+    that way -- EmailProvider.is_connected declines on unknown rather
+    than assuming, since assuming the current SCOPES list was granted is
+    precisely how an account that connected before gmail.send existed
+    would be reported as able to send mail it cannot send.
+    """
+    entry = _load_entry(business_id)
+
+    if not isinstance(entry, dict):
+        return None
+
+    scopes = entry.get("scopes")
+    if not isinstance(scopes, list) or not scopes:
+        return None
+
+    return [str(scope) for scope in scopes]
 
 
 def _fetch_all_env_vars(service_id: str, headers: dict) -> dict:
@@ -228,7 +296,11 @@ def _parse_existing_tokens(raw_existing, logger: Logger) -> dict:
         )
         return {}
 
-    return {str(k): str(v) for k, v in parsed.items()}
+    # Values are kept AS THEY ARE, not coerced to str: another
+    # business's entry may already be in the {"refresh_token", "scopes"}
+    # object form, and str()-ing it here would rewrite that entry as the
+    # repr of a dict and destroy their connection on the next load.
+    return dict(parsed)
 
 
 def _log_error(logger: Logger, message: str) -> None:
