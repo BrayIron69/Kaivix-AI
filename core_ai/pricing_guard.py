@@ -89,7 +89,7 @@ def strip_approved_shorthand_range(text: str) -> str:
     return APPROVED_SHORTHAND_RANGE_PATTERN.sub("", text)
 
 
-def find_unapproved_figures(text: str) -> list[str]:
+def find_unapproved_figures(text: str, visitor_stated=None) -> list[str]:
     """
     Every dollar figure in `text` that Bray is not allowed to say.
 
@@ -97,13 +97,50 @@ def find_unapproved_figures(text: str) -> list[str]:
     "allowed?" question is answered, so the production guard, the unit
     test that scans the knowledge base, and the eval's no_price_leak
     check can never disagree about it.
+
+    `visitor_stated` is the set of figures the VISITOR themselves used
+    in this conversation. Repeating a number back to the person who
+    just said it is not inventing a price -- it is the most basic form
+    of listening, and blocking it made Bray unable to acknowledge a
+    stated budget. Measured, not theorised: a visitor saying "our budget
+    is 20000 dollars" had the whole reply replaced by the deflection,
+    twice in one test conversation, because Bray echoed their own
+    number back.
+
+    This does NOT widen what Bray may claim about KAIVIX's pricing. The
+    allowance is per-conversation and derived only from what the visitor
+    actually typed, so it can never introduce a figure nobody mentioned,
+    and rule 7 plus the knowledge base still govern quoting a real
+    price. Defaults to nothing allowed, so every existing caller --
+    including the knowledge-base scan, which has no conversation and
+    must stay absolute -- is completely unaffected.
     """
     scrubbed = strip_approved_shorthand_range(text or "")
+    allowed = ALLOWED_DOLLAR_FIGURES | set(visitor_stated or ())
     return [
         figure
         for figure in DOLLAR_PATTERN.findall(scrubbed)
-        if figure not in ALLOWED_DOLLAR_FIGURES
+        if figure not in allowed
     ]
+
+
+def figures_stated_by(messages) -> set:
+    """
+    Dollar figures the visitor has actually used, gathered from their
+    own turns.
+
+    Takes the same {"role", "content"} history ConversationEngine
+    already holds, and reads ONLY role="user" entries -- gathering from
+    the assistant's turns too would let one invented figure launder
+    itself into being permanently allowed for the rest of the
+    conversation.
+    """
+    stated = set()
+    for message in messages or []:
+        if (message or {}).get("role") != "user":
+            continue
+        stated.update(DOLLAR_PATTERN.findall(message.get("content") or ""))
+    return stated
 
 
 def contains_unapproved_price(text: str) -> bool:

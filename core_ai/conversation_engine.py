@@ -22,7 +22,11 @@ from core_ai.goal_engine import GoalEngine
 from core_ai.lead_intelligence_engine import LeadIntelligenceEngine
 from core_ai.memory_manager import MemoryManager
 from core_ai.planning_engine import PlanningEngine
-from core_ai.pricing_guard import PRICE_DEFLECTION_RESPONSE, find_unapproved_figures
+from core_ai.pricing_guard import (
+    PRICE_DEFLECTION_RESPONSE,
+    figures_stated_by,
+    find_unapproved_figures,
+)
 from crm.lead_conversations import get_lead_conversation_links
 from core_ai.prompt_builder import PromptBuilder
 from core_ai.qualification_engine import QualificationEngine
@@ -31,6 +35,11 @@ from core_ai.unbacked_action_detector import UnbackedActionCategory, UnbackedAct
 from core_ai.working_memory import WorkingMemory
 from scheduling.email_provider import EmailProvider
 from scheduling.google_calendar_provider import GoogleCalendarProvider
+from scheduling.offered_slot_store import (
+    deserialize_window,
+    get_offered_slot_store,
+    serialize_slots,
+)
 from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
 from tools.email_tool import SendOverviewEmailTool
@@ -254,6 +263,13 @@ class ConversationEngine:
         # the worst case is one duplicate follow-up after a deploy, not
         # a wrong claim to the visitor.
         self._tools_run_by_conversation: dict[str, set] = {}
+
+        # Durable home for the times most recently offered to a
+        # visitor. _offered_slot_windows above stays as a same-process
+        # cache; this is the copy that survives a restart, which is what
+        # keeps a half-finished booking resolvable. See
+        # scheduling/offered_slot_store.py.
+        self.offered_slot_store = get_offered_slot_store()
 
     # ------------------------------------------------------------------
     # Public API
@@ -737,7 +753,16 @@ class ConversationEngine:
         real visitor. It is caught, but it is not routine, and it is the
         only signal that would show the rate moving.
         """
-        unapproved = find_unapproved_figures(response)
+        # Figures the VISITOR themselves used this conversation are not
+        # invented prices -- repeating a budget back to the person who
+        # just stated it is listening, not quoting. Without this, a
+        # visitor saying "our budget is 20000 dollars" had Bray's entire
+        # reply replaced by the deflection, twice in one real test
+        # conversation. Read from stored history rather than only this
+        # turn's message, so it still holds several turns later.
+        visitor_stated = figures_stated_by(self.memory.get_conversation(conversation_id))
+
+        unapproved = find_unapproved_figures(response, visitor_stated=visitor_stated)
         if not unapproved:
             return response
 
@@ -1426,6 +1451,24 @@ class ConversationEngine:
             self._offered_slot_windows[conversation_id] = windows
             working_memory.set_offered_slots(slots)
 
+            # Durable copy, so the visitor's "2" still resolves after a
+            # restart. Both halves together (see BaseOfferedSlotStore):
+            # the text they saw, and the real times to book. Never
+            # raises -- failing to persist means this turn behaves
+            # exactly as it did before, in-memory only.
+            try:
+                self.offered_slot_store.save(
+                    self.business_id,
+                    conversation_id,
+                    serialize_slots(windows, slots),
+                )
+            except Exception as error:
+                self.logger.error(
+                    f"[OfferedSlots] Could not persist the offered times "
+                    f"(conversation_id={conversation_id}): "
+                    f"{type(error).__name__}: {error}"
+                )
+
             return replace(plan, available_slots=slots)
         except Exception as error:
             self.logger.error(
@@ -1433,6 +1476,55 @@ class ConversationEngine:
                 f"(conversation_id={conversation_id}): {error}"
             )
             return plan
+
+    def _load_offered_slots(self, conversation_id: str, working_memory) -> list:
+        """
+        The times this visitor was last shown, preferring the durable
+        record and falling back to the in-memory pair.
+
+        The store is asked first because it is the only copy that
+        survives a restart, and the restart case is exactly the one that
+        used to lose a booking. The in-memory fallback still matters:
+        if persisting failed on the offering turn (logged, never
+        raised), same-process booking must keep working rather than be
+        taken down by a storage problem.
+        """
+        try:
+            stored = self.offered_slot_store.load(self.business_id, conversation_id)
+        except Exception as error:
+            self.logger.error(
+                f"[OfferedSlots] Could not read the offered times "
+                f"(conversation_id={conversation_id}): "
+                f"{type(error).__name__}: {error}"
+            )
+            stored = []
+
+        if stored:
+            return stored
+
+        windows = self._offered_slot_windows.get(conversation_id) or []
+        displays = list(getattr(working_memory, "offered_slots", None) or [])
+        if not windows or not displays:
+            return []
+
+        return serialize_slots(windows, displays)
+
+    def _clear_offered_slots(self, conversation_id: str, working_memory) -> None:
+        """
+        Drop the offered times from every place they live, once booked
+        or abandoned. All three together, so a later turn can never
+        resolve a number against a list that is half gone.
+        """
+        working_memory.set_offered_slots([])
+        self._offered_slot_windows.pop(conversation_id, None)
+        try:
+            self.offered_slot_store.clear(self.business_id, conversation_id)
+        except Exception as error:
+            self.logger.error(
+                f"[OfferedSlots] Could not clear the offered times "
+                f"(conversation_id={conversation_id}): "
+                f"{type(error).__name__}: {error}"
+            )
 
     def _maybe_run_requested_tool(
         self, conversation_id: str, plan: ConversationPlan, lead: LeadProfile
@@ -1538,31 +1630,37 @@ class ConversationEngine:
             if not self._calendar_booking_enabled():
                 return None
 
-            offered_slots = list(working_memory.offered_slots or [])
-            if not offered_slots:
+            # The durable record is the source of truth, not the
+            # in-memory pair. After a restart working_memory.offered_slots
+            # and _offered_slot_windows are both empty while the visitor
+            # is mid-booking, which used to mean "2" resolved to nothing
+            # and the booking silently never happened.
+            stored = self._load_offered_slots(conversation_id, working_memory)
+            if not stored:
                 return None
+
+            offered_slots = [slot.get("display", "") for slot in stored]
 
             matched_index = match_offered_slot(user_message, offered_slots)
             if matched_index is None:
                 return None
 
             matched_slot_text = offered_slots[matched_index]
-            windows = self._offered_slot_windows.get(conversation_id) or []
+            window = deserialize_window(stored[matched_index])
 
-            if matched_index >= len(windows):
-                # Matched a display string but have no structured
-                # start/end to actually book (e.g. stale/desynced cache)
-                # -- fail safely rather than guess a time.
+            if window is None:
+                # Matched a display string but have no usable structured
+                # start/end to actually book -- fail safely rather than
+                # guess a time.
                 self.logger.error(
                     f"[GoogleCalendarProvider] Matched offered slot "
-                    f"{matched_index} but no cached start/end window "
-                    f"available (conversation_id={conversation_id})"
+                    f"{matched_index} but its stored start/end could not be "
+                    f"read (conversation_id={conversation_id})"
                 )
-                working_memory.set_offered_slots([])
-                self._offered_slot_windows.pop(conversation_id, None)
+                self._clear_offered_slots(conversation_id, working_memory)
                 return {"confirmation": "", "failed": True}
 
-            start_time, end_time = windows[matched_index]
+            start_time, end_time = window
 
             # No trailing " - " when there is nobody to name. A real
             # booking went onto a real calendar titled "Kaivix Demo
@@ -1581,8 +1679,7 @@ class ConversationEngine:
                 attendee_email=lead.email,
             )
 
-            working_memory.set_offered_slots([])
-            self._offered_slot_windows.pop(conversation_id, None)
+            self._clear_offered_slots(conversation_id, working_memory)
 
             if result.get("success"):
                 # Whether Google actually had an attendee to invite.
