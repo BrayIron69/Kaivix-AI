@@ -1,10 +1,23 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from auth import business_api_keys
 from core_ai.business_config import BusinessConfigError, DEFAULT_BUSINESS_ID
-from schemas.chat import MAX_MESSAGE_LENGTH, ChatRequest, ChatResponse
+from schemas.chat import (
+    MAX_MESSAGE_LENGTH,
+    VISITOR_ID_PATTERN,
+    ChatRequest,
+    ChatResponse,
+    ConversationListResponse,
+    ConversationMessagesResponse,
+)
 from services.chat_service import ChatService
 from utils.logger import Logger
+
+# Most threads one request may ask for. The store has its own default
+# (see DEFAULT_CONVERSATION_LIMIT); this is the ceiling a caller cannot
+# exceed, so a crafted limit cannot turn one request into an unbounded
+# read.
+MAX_CONVERSATION_LIMIT = 100
 
 router = APIRouter(
     prefix="/chat",
@@ -135,6 +148,7 @@ def _handle(request: ChatRequest, business_id: str) -> ChatResponse:
             conversation_id=request.conversation_id,
             message=request.message,
             business_id=business_id,
+            visitor_id=request.visitor_id,
         )
     except BusinessConfigError as error:
         # An unknown/misconfigured business_id in the URL is a client error,
@@ -172,6 +186,93 @@ def chat(request: ChatRequest):
     tests/test_chat_business_auth.py both exist to catch that.
     """
     return _handle(request, DEFAULT_BUSINESS_ID)
+
+
+@router.get("/conversations", response_model=ConversationListResponse)
+def list_conversations(
+    visitor_id: str = Query(
+        ...,
+        pattern=VISITOR_ID_PATTERN,
+        description="The browser's stable visitor identifier.",
+    ),
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=MAX_CONVERSATION_LIMIT,
+        description="Maximum threads to return.",
+    ),
+):
+    """
+    This visitor's past conversations for DEFAULT_BUSINESS_ID, most
+    recently active first. Backs the widget's Messages tab.
+
+    Unauthenticated, for exactly the reason plain POST /chat is: the
+    caller is an anonymous visitor on the public marketing site with no
+    credential to present. The visitor_id itself is the authorization --
+    it is high-entropy, minted in the visitor's own browser, and never
+    guessable from outside (see VISITOR_ID_PATTERN for why the length
+    floor is the security-relevant part).
+
+    That makes this endpoint exactly as strong as the visitor_id is
+    secret, which is the same trust model as an unguessable share link.
+    It is scoped to that: a visitor's own chat threads with a sales bot
+    on a public website. Anything more sensitive than that does not
+    belong behind this kind of identifier.
+
+    An unknown visitor_id returns an empty list rather than a 404 -- a
+    first-time visitor and a made-up id are indistinguishable, and they
+    should be.
+    """
+    conversations = chat_service.list_conversations(
+        visitor_id=visitor_id,
+        business_id=DEFAULT_BUSINESS_ID,
+        limit=limit,
+    )
+
+    return ConversationListResponse(conversations=conversations)
+
+
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=ConversationMessagesResponse,
+)
+def get_conversation(
+    conversation_id: str,
+    visitor_id: str = Query(
+        ...,
+        pattern=VISITOR_ID_PATTERN,
+        description="The browser's stable visitor identifier.",
+    ),
+):
+    """
+    One past conversation's full history, oldest first, so the widget
+    can reopen it and continue it.
+
+    Returns 404 unless this visitor owns this conversation. The
+    ownership check lives in ChatService.get_conversation -- see there
+    for why it is mandatory rather than best-effort.
+
+    "Not yours" and "does not exist" deliberately return the same 404
+    with the same message. Distinguishing them would turn this route
+    into an oracle for which conversation ids exist, and those ids are
+    currently low-entropy enough to enumerate.
+    """
+    messages = chat_service.get_conversation(
+        conversation_id=conversation_id,
+        visitor_id=visitor_id,
+        business_id=DEFAULT_BUSINESS_ID,
+    )
+
+    if messages is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No such conversation for this visitor.",
+        )
+
+    return ConversationMessagesResponse(
+        conversation_id=conversation_id,
+        messages=messages,
+    )
 
 
 @router.post(

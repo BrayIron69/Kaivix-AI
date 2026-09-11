@@ -78,6 +78,7 @@ class ChatService:
         message: str,
         business_id: str = DEFAULT_BUSINESS_ID,
         channel: str = "chat",
+        visitor_id: str | None = None,
     ) -> str:
         """
         business_id defaults to DEFAULT_BUSINESS_ID, so the original
@@ -89,9 +90,79 @@ class ChatService:
         passes channel="voice", threaded straight through to
         ConversationEngine.process_message (see its docstring for what
         this actually changes).
+
+        visitor_id, when the caller sends one, associates this
+        conversation with the browser that started it, so the widget's
+        Messages tab can list the visitor's own threads later. It is
+        recorded here rather than inside ConversationEngine on purpose:
+        the engine reasons about a conversation and has no concept of
+        the browser behind it, and threading a visitor through it would
+        mean touching all five of its memory write sites for something
+        none of them use. This class is already the seam that decides
+        which business a turn belongs to -- which visitor is the same
+        kind of routing fact.
+
+        It stays optional. The voice channel has no browser and sends
+        nothing, older widget builds send nothing, and both keep working
+        exactly as before -- they simply produce threads that no
+        Messages tab lists.
         """
-        return self.get_engine(business_id).process_message(
+        engine = self.get_engine(business_id)
+
+        if visitor_id:
+            # Before the turn, so a conversation is listable even if the
+            # engine raises partway through answering it -- the user's
+            # message is already recorded by then.
+            engine.memory.link_visitor(conversation_id, visitor_id)
+
+        return engine.process_message(
             conversation_id=conversation_id,
             user_message=message,
             channel=channel,
         )
+
+    def list_conversations(
+        self,
+        visitor_id: str,
+        business_id: str = DEFAULT_BUSINESS_ID,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """
+        This visitor's past threads for this business, newest first.
+
+        Routed through the same per-business engine as chat() so the
+        thread list is read from exactly the store that business's
+        messages were written to.
+        """
+        return self.get_engine(business_id).memory.list_conversations(
+            visitor_id, limit
+        )
+
+    def get_conversation(
+        self,
+        conversation_id: str,
+        visitor_id: str,
+        business_id: str = DEFAULT_BUSINESS_ID,
+    ) -> list[dict] | None:
+        """
+        One thread's messages, oldest first, for reopening it in the
+        widget -- but only for the visitor the thread belongs to.
+
+        Returns None when this visitor does not own the conversation, or
+        when nothing owns it, so the caller can answer identically in
+        both cases and never reveal which conversation ids exist.
+
+        visitor_id is required rather than optional deliberately. Making
+        it optional would leave a route that returns a transcript given
+        only a conversation_id, and those ids are 'session_' +
+        Math.random() -- an attacker enumerating them would be reading
+        strangers' conversations. The check lives here, in the one place
+        both the list and detail routes pass through, rather than in the
+        router where a future second caller could forget it.
+        """
+        memory = self.get_engine(business_id).memory
+
+        if not visitor_id or memory.get_visitor_id(conversation_id) != visitor_id:
+            return None
+
+        return memory.get_conversation(conversation_id)

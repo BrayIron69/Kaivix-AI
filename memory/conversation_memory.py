@@ -58,3 +58,31 @@ class ConversationMemory:
 
     def clear(self, conversation_id: str):
         self.store.clear(self.business_id, conversation_id)
+
+    def link_visitor(self, conversation_id: str, visitor_id: str):
+        """
+        Record which visitor this conversation belongs to.
+
+        Idempotent, so the caller may call it on every turn without
+        checking whether the link already exists -- see
+        BaseConversationStore.link_visitor for why a later, differing
+        visitor_id is ignored rather than honoured.
+        """
+        self.store.link_visitor(self.business_id, conversation_id, visitor_id)
+
+    def get_visitor_id(self, conversation_id: str):
+        """Which visitor owns this conversation, or None."""
+        return self.store.get_visitor_id(self.business_id, conversation_id)
+
+    def list_conversations(self, visitor_id: str, limit: int | None = None):
+        """
+        This visitor's conversations within this business, most recently
+        active first.
+
+        `limit` is passed through only when given, so the store's own
+        default stays the single place that number is defined.
+        """
+        if limit is None:
+            return self.store.list_conversations(self.business_id, visitor_id)
+
+        return self.store.list_conversations(self.business_id, visitor_id, limit)

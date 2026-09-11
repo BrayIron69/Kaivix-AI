@@ -1793,6 +1793,79 @@ Confirmed against real production behavior at every step, not assumed from eithe
 
 ---
 
+# Decision #033
+
+## Visitors Identified By A Client-Minted `visitor_id` In A Separate `conversation_visitors` Table, Not By A Cookie Or A Column On `conversation_messages`
+
+**Date**
+
+2026-09-11
+
+**Status**
+
+Accepted
+
+### Context
+
+Phase 1 of the three-tab widget upgrade (Home / Messages / Help) was specified as "add real persistence for conversation history, because `ConversationMemory` is an in-memory object with nothing written to a database."
+
+That premise was checked before any code was written, and it was false. The earlier Postgres migration already made `ConversationMemory` fully durable: it delegates to a `BaseConversationStore` (SQLite locally, Postgres when `DATABASE_URL` is set), `conversation_messages` is tenant-scoped on `(business_id, conversation_id)`, and `tests/test_conversation_memory_persistence.py` already covered a simulated restart. A two-process check confirmed it live — one process wrote, a separate process read the transcript back.
+
+The real defect was one line of frontend, in the marketing site's `kaivix.js`:
+
+```js
+var sessionId = 'session_' + Math.random().toString(36).slice(2);
+```
+
+A closure variable, regenerated on every page load and never stored. Transcripts were being written faithfully and then orphaned, because nothing could ever ask for them again. Three further gaps followed from the same root: no way to list a visitor's threads (the store only does add/get/clear), `created_at` stored but never selected, and no read endpoint at all.
+
+`WorkingMemory` and `ConversationSummary` are genuinely process-local, but both are *derived* — `WorkingMemory.update()` rebuilds every field from history each turn, and `ConversationSummary` is explicitly stateless and deterministic. They reconstruct themselves from stored history.
+
+### Decision
+
+Identity is a **client-minted `visitor_id`** (`crypto.randomUUID()`), stored in the visitor's own `localStorage` and sent in the request body — explicitly **not** a cookie. The widget runs on `kaivixlab.com` while the API is `kaivix-ai.onrender.com`, so any cookie the API set would be a third-party cookie, blocked by default in Safari and Firefox and now Chrome. The originally-specified cookie approach would have silently failed for a large share of real visitors.
+
+The visitor→thread association lives in a **new `conversation_visitors` table**, not as a column on `conversation_messages`. The visitor is a property of the thread, not of each message; a per-row column would repeat it on every turn and allow a thread whose rows disagree about who owns it. It also means the engine's hot write path is untouched — all five `add_user_message`/`add_assistant_message` call sites in `ConversationEngine` are unchanged.
+
+The link is written by `ChatService`, not `ConversationEngine`. The engine reasons about a conversation and has no concept of the browser behind it; `ChatService` is already the seam deciding which business a turn belongs to, and which visitor is the same kind of routing fact.
+
+Recency, message count and preview are **derived at read time** by joining `conversation_visitors` against `conversation_messages`, rather than denormalized onto the thread row — the messages table is already the source of truth, and a cached `last_message_at` is a value that can drift.
+
+`WorkingMemory` and `ConversationSummary` are deliberately **not** persisted. Storing derived state would duplicate what history already determines, against Rule 6.
+
+### Reasoning
+
+`visitor_id` is a bearer capability: whoever holds it can list and reopen that visitor's threads. Two things follow, both enforced rather than documented. It must be unguessable — `VISITOR_ID_PATTERN` sets a 16-character floor, and the widget mints a full UUID. And `GET /chat/conversations/{conversation_id}` must verify ownership, because existing conversation ids are `'session_' + Math.random()` — low-entropy and trivially enumerable, so a route answering "give me this conversation's messages" from an id alone would hand out strangers' transcripts. That check lives in `ChatService.get_conversation`, which both read routes pass through, rather than in the router where a future caller could omit it.
+
+"Not yours" and "does not exist" return an identical 404, so the route cannot be used as an oracle for which conversation ids exist. An unknown `visitor_id` returns an empty list rather than a 404, because a first-time visitor and a fabricated id should be indistinguishable.
+
+The new GET routes are unauthenticated for the same reason plain `POST /chat` is and must remain so: the caller is an anonymous visitor with no credential to present. The trust model is that of an unguessable share link, and it is scoped to exactly that — a visitor's own chat threads with a sales bot on a public site.
+
+Both new methods were added to `BaseConversationStore` as abstract, so a backend cannot silently omit them. The non-trivial thread-index query is shared between the two stores via `list_conversations_sql(placeholder)` rather than written twice — unlike the one-line add/get/clear statements, it encodes real logic (what a visitor owns, how recency is defined) that must not drift between SQLite and Postgres.
+
+### Verification
+
+- **The disproved premise, checked rather than assumed**: one process wrote a transcript, a separate OS process read it back intact — persistence already worked before this change.
+- **New tests**: `tests/test_conversation_visitor_threads.py`, 21 tests covering idempotent linking, refusal to reassign an owned thread, recency ordering with the id tie-break, exclusion of message-less threads, visitor isolation, tenant isolation on a shared conversation id, limits, survival across a new store instance, cascade on `clear()`, preview/timestamp formatting, and all four ownership-enforcement paths.
+- **End-to-end through the real FastAPI app** (routes driven over HTTP, only the LLM stubbed, temp database): two threads from one browser listed newest-first with correct counts and previews; a reopened thread returned its four turns in order; a second visitor saw an empty list and got a 404 on the first visitor's thread; a request with no `visitor_id` still returned 200 unchanged; a 5-character `visitor_id` was rejected with 422; threads survived a fresh store instance.
+- **Full suite**: 836 passed, 14 skipped, zero regressions (815 → 836, 21 new). An initial run showed 189 failures traced to a missing local `GROQ_API_KEY` in the shell, not to this change — supplying one returned the suite to green.
+
+### Consequences
+
+**Benefits**
+- A visitor's conversations now survive a page reload, which is the actual behaviour Phases 2–4 depend on and the thing that was genuinely broken
+- `conversation_messages` and every engine write site are untouched, so the hot path carries no new column and no new write
+- Reopening a thread is authorization-checked, closing a hole that would otherwise have been opened by exposing transcripts behind guessable conversation ids
+- Both backends stay in step by construction: shared query, shared preview/timestamp normalization, abstract methods on the base store
+
+**Trade-offs**
+- `visitor_id` in `localStorage` is per-browser and per-device: clearing site data or switching devices loses the thread list, and there is no account to recover it from — the cost of not having visitor accounts, which this product does not have
+- Anyone who obtains a visitor's `visitor_id` can read that visitor's threads; the identifier is the credential, exactly as an unguessable share link is
+- Conversations recorded before this ships have no visitor row and will never appear in a Messages tab — correct, since nothing recorded who they belonged to, but it means the tab starts empty for everyone
+- The thread index is computed by a join on every listing rather than read from a denormalized row; correct by construction, and a cached column is the optimization available if listing ever becomes hot
+
+---
+
 \---
 
 
