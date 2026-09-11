@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Optional
 
 from core_ai.business_config import (
@@ -76,6 +77,17 @@ class PlanningEngine:
             business_config = _default_business_config_repository.load(DEFAULT_BUSINESS_ID)
 
         self._field_questions = self._build_field_questions(business_config)
+        # Which tools this business switched on. Read once here, the
+        # same way the field questions are, so deciding whether to
+        # request a tool stays a pure in-memory check and this engine
+        # keeps performing no I/O.
+        tools = getattr(business_config, "tools", None)
+        self._enabled_tools = list(getattr(tools, "enabled_tools", None) or [])
+
+    # Requested at the closing moment, when there is a real address to
+    # send to. Named here rather than inline so the one string lives in
+    # one place alongside the tool's own `name`.
+    OVERVIEW_EMAIL_TOOL = "send_overview_email"
 
     @staticmethod
     def _build_field_questions(business_config) -> dict:
@@ -154,7 +166,10 @@ class PlanningEngine:
         if stage == ConversationStage.CLOSING or (
             temperature == self.HOT_TEMPERATURE and len(missing_fields) <= 1
         ):
-            return self._plan_closing(goal_value, temperature, score, missing_fields)
+            return self._attach_overview_email_request(
+                self._plan_closing(goal_value, temperature, score, missing_fields),
+                lead,
+            )
 
         # 3. Otherwise, keep collecting missing qualification info.
         if missing_fields:
@@ -181,6 +196,37 @@ class PlanningEngine:
             next_question="Acknowledge the objection, reframe it briefly, then check if it's resolved.",
             avoid_topics=[self.PRICING_TOPIC] if missing_fields else [],
             recommended_action="Address objections before continuing qualification.",
+        )
+
+    def _attach_overview_email_request(self, plan, lead) -> ConversationPlan:
+        """
+        Request the follow-up overview email, at the closing moment and
+        only then.
+
+        Deliberately narrow. Sending real mail to a real prospect is a
+        side effect that cannot be taken back, so the trigger is the one
+        point in the conversation where a follow-up is unambiguously the
+        right next action: the lead is qualified enough to be driven
+        toward booking (this is the closing branch) AND there is a real
+        address on file to send to.
+
+        Records the request only. It performs no send, makes no network
+        call, and checks nothing about whether mail is actually
+        deliverable -- ConversationEngine does all of that one step
+        later, and is also what enforces once-per-conversation, since it
+        owns the record of what has already been done. This engine stays
+        stateless and I/O-free, exactly as its docstring promises.
+        """
+        if self.OVERVIEW_EMAIL_TOOL not in self._enabled_tools:
+            return plan
+
+        recipient = (getattr(lead, "email", "") or "").strip()
+        if not recipient:
+            return plan
+
+        return replace(
+            plan,
+            tool_request={"name": self.OVERVIEW_EMAIL_TOOL, "args": {}},
         )
 
     def _plan_closing(self, goal_value, temperature, score, missing_fields):

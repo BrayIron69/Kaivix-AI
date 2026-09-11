@@ -52,5 +52,24 @@ class ConversationPlan:
     # same time as a non-empty booking_confirmation.
     booking_failed: bool = False
 
+    # A tool PlanningEngine has deterministically decided should run
+    # this turn, as {"name": str, "args": dict}, or None. PlanningEngine
+    # only ever RECORDS the request -- it performs no I/O, same as it
+    # never sets available_slots or booking_confirmation above.
+    # ConversationEngine._maybe_run_requested_tool executes it one step
+    # later and writes tool_result below.
+    #
+    # Deliberately not an LLM function call: the model deciding when to
+    # send real mail to a real prospect is the exact failure Decision
+    # #030's unbacked-action gate exists to prevent.
+    tool_request: dict = None
+
+    # The ToolResult of tool_request, as a dict, or None when no tool
+    # ran. PromptBuilder renders a confirmation ONLY when this says
+    # success -- so Bray stating that an email went out is downstream of
+    # an email actually going out, never downstream of the conversation
+    # feeling like it should have.
+    tool_result: dict = None
+
     def to_dict(self) -> dict:
         return asdict(self)

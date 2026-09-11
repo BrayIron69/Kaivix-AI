@@ -264,6 +264,31 @@ RULES:
                     "confirmation will be sent to their email.",
                 ]
 
+            # The ONLY thing in this prompt that authorises Bray to say
+            # an action was performed. Rule 12 forbids claiming any
+            # completed action unless a dedicated section confirms it --
+            # this is that section, and it appears only after a real
+            # tool reported success (see
+            # ConversationEngine._maybe_run_requested_tool).
+            #
+            # A FAILED tool deliberately renders nothing at all rather
+            # than an "it failed" note: with no section present, rule 12
+            # already produces the correct behaviour (don't mention it),
+            # and describing the failure invites Bray to volunteer an
+            # apology for something the visitor never asked for and may
+            # not have expected.
+            plan_tool_result = getattr(plan, "tool_result", None) or {}
+            if plan_tool_result.get("success") and plan_tool_result.get("summary"):
+                sections += [
+                    "",
+                    "ACTION ALREADY COMPLETED THIS TURN (this really happened, "
+                    "you may state it as fact):",
+                    plan_tool_result["summary"],
+                    "Mention it naturally, in your own words, as something already "
+                    "done. Do not promise to do it, and do not offer to do it "
+                    "again.",
+                ]
+
             plan_booking_failed = bool(getattr(plan, "booking_failed", False))
             if plan_booking_failed:
                 if channel == "voice":

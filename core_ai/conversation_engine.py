@@ -29,6 +29,8 @@ from scheduling.email_provider import EmailProvider
 from scheduling.google_calendar_provider import GoogleCalendarProvider
 from scheduling.slot_matcher import match_offered_slot
 from services.lead_service import LeadService
+from tools.email_tool import SendOverviewEmailTool
+from tools.registry import ToolRegistry
 from utils.logger import Logger, conversation_bodies_enabled, redact_free_text
 
 
@@ -189,6 +191,18 @@ class ConversationEngine:
         # entirely determined by EmailProvider.is_connected() (real
         # scope check) at the point of use, same as calendar_provider.
         self.email_provider = EmailProvider()
+        # Shares this engine's EmailProvider rather than constructing a
+        # second one, so there is one Gmail connection per engine and
+        # a test that swaps self.email_provider affects both the tool
+        # and the existing "email me a summary" path.
+        self.tool_registry = ToolRegistry(
+            tools={
+                SendOverviewEmailTool.name: SendOverviewEmailTool(
+                    email_provider=self.email_provider, logger=self.logger
+                )
+            },
+            logger=self.logger,
+        )
 
         # Coordinates WorkingMemory (every turn), ConversationSummary
         # (every `summary_refresh_interval_turns` turns), and
@@ -218,6 +232,17 @@ class ConversationEngine:
         # text back into a date -- inherently ambiguous once more than a
         # few days have passed (which Tuesday?).
         self._offered_slot_windows: dict[str, list[tuple]] = {}
+
+        # Which side-effecting tools have already succeeded for a given
+        # conversation. PlanningEngine is stateless and re-requests the
+        # overview email on every closing turn, so without this a
+        # visitor who lingers in the closing stage would be mailed on
+        # every message. Same process-local, per-conversation shape as
+        # _offered_slot_windows above, and with the same limitation: it
+        # does not survive a restart. Acceptable for the same reason --
+        # the worst case is one duplicate follow-up after a deploy, not
+        # a wrong claim to the visitor.
+        self._tools_run_by_conversation: dict[str, set] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -379,6 +404,13 @@ class ConversationEngine:
             # -- this lookup belongs here, one step after the plan is
             # produced, not inside PlanningEngine.
             plan = self._maybe_attach_availability(conversation_id, plan, working_memory)
+
+        # Executes whatever tool PlanningEngine deterministically asked
+        # for this turn (it records the request; it performs no I/O --
+        # same split as availability/booking above). The ToolResult goes
+        # back onto the plan, which is the ONLY thing that lets
+        # PromptBuilder authorise Bray to say the action happened.
+        plan = self._maybe_run_requested_tool(conversation_id, plan, lead)
 
         knowledge = self._gather_knowledge(conversation_id, user_message)
 
@@ -1218,6 +1250,75 @@ class ConversationEngine:
                 f"(conversation_id={conversation_id}): {error}"
             )
             return plan
+
+    def _maybe_run_requested_tool(
+        self, conversation_id: str, plan: ConversationPlan, lead: LeadProfile
+    ) -> ConversationPlan:
+        """
+        Run the tool PlanningEngine requested for this turn, if any, and
+        attach the result to the plan.
+
+        Owns two things PlanningEngine deliberately does not: the actual
+        I/O, and the record of what has already been done. A tool with a
+        real side effect runs AT MOST ONCE per conversation -- the
+        planner re-requests the overview email on every closing turn
+        (it is stateless by design), and without this ledger a visitor
+        who lingers in the closing stage would be mailed on every single
+        message.
+
+        Mirrors _sync_lead_to_crm's error-handling contract: never
+        raises, and a failure leaves the plan without a successful
+        tool_result, which is exactly what keeps Bray from claiming the
+        action happened.
+        """
+        request = getattr(plan, "tool_request", None) or {}
+        tool_name = request.get("name") or ""
+        if not tool_name:
+            return plan
+
+        already_run = self._tools_run_by_conversation.setdefault(conversation_id, set())
+        if tool_name in already_run:
+            return plan
+
+        business_context = {
+            "business_id": self.business_id,
+            "business_name": self.business_config.identity.business_name,
+            "booking_link": self.business_config.persona.booking_link or "",
+            "lead_email": getattr(lead, "email", "") or "",
+            "lead_name": getattr(lead, "name", "") or "",
+        }
+
+        result = self.tool_registry.run(
+            tool_name,
+            request.get("args") or {},
+            business_context,
+            self.business_config.tools.enabled_tools,
+        )
+
+        # Recorded on success only. A failed send should be retryable on
+        # a later turn (the address may have only just been corrected),
+        # whereas a successful one must never repeat.
+        if result.success:
+            already_run.add(tool_name)
+            self.logger.info(
+                f"[ToolRegistry] {tool_name} succeeded "
+                f"(conversation_id={conversation_id}, business_id={self.business_id!r})"
+            )
+        else:
+            self.logger.warning(
+                f"[ToolRegistry] {tool_name} did not run "
+                f"(conversation_id={conversation_id}, "
+                f"business_id={self.business_id!r}): {result.error}"
+            )
+
+        return replace(
+            plan,
+            tool_result={
+                "name": tool_name,
+                "success": result.success,
+                "summary": result.summary,
+            },
+        )
 
     def _maybe_resolve_booking(
         self,

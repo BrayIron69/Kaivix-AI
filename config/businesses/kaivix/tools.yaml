@@ -5,5 +5,13 @@
 # real event when a visitor picks a slot. A connected calendar is
 # necessary but no longer sufficient -- the tool has to be listed here
 # too (see ConversationEngine._calendar_booking_enabled).
+#
+# send_overview_email gates the real follow-up email (tools/email_tool.py,
+# requested by PlanningEngine at the closing moment and executed by
+# ConversationEngine._maybe_run_requested_tool). Listing it here is
+# necessary but not sufficient: EmailProvider must also report a
+# connection that actually granted gmail.send, or the tool declines and
+# Bray says nothing about email at all.
 enabled_tools:
   - calendar_booking
+  - send_overview_email
