@@ -145,11 +145,30 @@ def persist_calendar_refresh_token(
         )
         return False
 
+    # Make the RUNNING process see it immediately.
+    #
+    # Writing the variable through Render's API updates the service's
+    # stored configuration, but does NOT restart the process or alter
+    # its os.environ -- an earlier version of this function claimed the
+    # write "triggers a redeploy", and that was simply wrong. The
+    # consequence was measured, not theorised: after a business
+    # completed /oauth/google/connect, EmailProvider.is_connected still
+    # returned False, because load_granted_scopes read the STALE value
+    # this process booted with, saw the old scope-less string form, and
+    # correctly refused to assume. Email only started working after a
+    # manual restart.
+    #
+    # os.environ is the same place load_refresh_token/
+    # load_granted_scopes read from, so updating it here closes the gap
+    # for this process, while the API write above is what closes it for
+    # every future one.
+    os.environ[REFRESH_TOKENS_ENV_VAR] = merged_env_vars[REFRESH_TOKENS_ENV_VAR]
+
     _log_info(
         logger,
-        f"Persisted refresh_token for business_id={business_id!r} to "
-        f"Render env vars -- will survive the redeploy this write itself "
-        f"triggers.",
+        f"Persisted refresh_token for business_id={business_id!r} to Render "
+        f"env vars, and applied it to this process so the connection is "
+        f"usable immediately rather than only after the next restart.",
     )
     return True
 

@@ -2,7 +2,24 @@ from core_ai.business_config import DEFAULT_BUSINESS_ID
 from crm.base_crm import BaseCRM
 from crm.registry import get_crm_provider
 
-DEFAULT_CRM_PROVIDER = "sqlite"
+# "internal" means this codebase's own database, resolving to postgres
+# when DATABASE_URL is set and sqlite otherwise (see
+# crm/registry.get_crm_provider).
+#
+# This was "sqlite", which became actively dangerous the moment leads
+# moved to Postgres: ConversationEngine passes the business's configured
+# provider and so WROTE to Postgres, while api/routers/admin.py and
+# api/routers/leads.py construct a bare LeadService() and so READ from
+# the ephemeral SQLite file. Leads were being saved correctly and the
+# dashboard reported 404 for every one of them -- caught by capturing a
+# real lead in production and finding "[LeadService] Lead saved." in the
+# logs next to a 404 from the admin page, not by inspection.
+#
+# A default that silently points somewhere other than where the rest of
+# the application is writing is worse than no default. This one now
+# follows the deployment, so a caller that forgets the argument still
+# lands in the same database as everything else.
+DEFAULT_CRM_PROVIDER = "internal"
 
 _PLACEHOLDER_VALUES = {"string", "none", "null"}
 
@@ -25,8 +42,10 @@ class LeadService:
         ----------
         crm_provider : str
             Name from business_config.providers.crm_provider. Defaults to
-            "sqlite", so LeadService() with no arguments behaves exactly as
-            it did when SQLiteCRM was hardcoded here.
+            "internal", which resolves to the same database the rest of
+            this deployment uses -- sqlite locally, postgres wherever
+            DATABASE_URL is set. See DEFAULT_CRM_PROVIDER above for the
+            production bug that default exists to prevent.
         crm : BaseCRM, optional
             A ready-made CRM instance, used in preference to crm_provider.
             Lets tests inject a double without going through the registry.

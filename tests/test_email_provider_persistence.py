@@ -170,6 +170,39 @@ class TestPersistingScopesDoesNotDamageOtherBusinesses(unittest.TestCase):
             written["kaivix"], {"refresh_token": "kaivix-rt", "scopes": [GMAIL_SEND_SCOPE]}
         )
 
+    @patch("scheduling.render_env_sync.requests")
+    def test_the_running_process_sees_the_new_value_without_a_restart(self, mock_requests):
+        """
+        The real gap this closes, measured in production rather than
+        theorised: after a business completed /oauth/google/connect,
+        EmailProvider.is_connected still returned False, because the
+        process kept reading the stale value it booted with. Writing to
+        Render updates the service's CONFIG, not this process's
+        os.environ, so email only worked after a manual restart.
+        """
+        mock_requests.get.return_value = MagicMock(status_code=200, json=lambda: [])
+        mock_requests.put.return_value = MagicMock(status_code=200)
+
+        provider = EmailProvider(token_store=MagicMock())
+
+        # Clearing the whole environment would also remove the Render
+        # credentials this function needs, so it would bail before
+        # writing anything and the test would pass for the wrong reason.
+        # Start from no stored token, with those credentials present.
+        with patch.dict(
+            "os.environ",
+            {"RENDER_API_KEY": "rnd_test", "RENDER_SERVICE_ID": "srv-test"},
+            clear=True,
+        ):
+            self.assertFalse(provider.is_connected("kaivix"))
+
+            render_env_sync.persist_calendar_refresh_token(
+                "kaivix", "fresh-rt", scopes=[GMAIL_SEND_SCOPE]
+            )
+
+            # No restart, no re-read from Render -- same process.
+            self.assertTrue(provider.is_connected("kaivix"))
+
 
 if __name__ == "__main__":
     unittest.main()
