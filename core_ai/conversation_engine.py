@@ -76,7 +76,31 @@ class ConversationEngine:
 
     # Intents that force a specific conversation stage, regardless of
     # qualification progress.
-    _OBJECTION_HANDLING_INTENTS = {"objection", "support", "pricing"}
+    #
+    # "support" and "pricing" USED to be in here, and both were wrong in
+    # a way that cost real bookings. A fully qualified, Hot lead replied
+    # "patient support mainly" -- naming the product they wanted to buy
+    # -- and the turn logged Stage: objection_handling. PlanningEngine's
+    # objection branch outranks everything else, so drive_to_booking
+    # never ran, the calendar was never consulted, and Bray fell back to
+    # the generic Calendly link instead of real times.
+    #
+    # The failure is specific to what this business SELLS. "support" is
+    # an intent keyword (core_ai/intent_detector.py), and this product
+    # automates customer support, so the single most likely word a
+    # prospect uses to describe what they want forced the objection
+    # stage. "pricing" was no better: a qualified buyer asking what it
+    # costs is the strongest buying signal there is, not a complaint.
+    #
+    # Genuine objection handling is untouched. PlanningEngine's branch
+    # is `objections or stage == OBJECTION_HANDLING or intent ==
+    # OBJECTION`, so both a recorded objection and the objection intent
+    # still route there; only the two intents that were never
+    # objections stopped doing so. An unqualified visitor asking about
+    # price also keeps its protection, from a better place:
+    # _plan_qualification already withholds pricing UNLESS the visitor
+    # is the one who raised it.
+    _OBJECTION_HANDLING_INTENTS = {"objection"}
     _CLOSING_INTENTS = {"meeting_request", "buying_signal"}
 
     # Thresholds used by stage detection.
