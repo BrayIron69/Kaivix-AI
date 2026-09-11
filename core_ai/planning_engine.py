@@ -202,8 +202,23 @@ class PlanningEngine:
 
         # 2. Hot leads (or an explicit closing stage) get steered toward
         #    booking, once there's little/nothing left to qualify.
-        if stage == ConversationStage.CLOSING or (
-            temperature == self.HOT_TEMPERATURE and len(missing_fields) <= 1
+        #    `not missing_fields` is the important half. Without it a
+        #    PERFECTLY qualified lead never reaches this branch: the
+        #    five fields kaivix's qualification.yaml asks for are worth
+        #    at most 65 in LeadIntelligenceEngine (email 15 + name 5 +
+        #    company 10 + budget 20 + timeline 15) and HOT starts at 75,
+        #    so the temperature test below is structurally unreachable
+        #    from qualification alone. Closing then depended on the
+        #    visitor happening to volunteer an urgency word (+10) or a
+        #    buying-signal keyword (+5), which is not something a
+        #    qualified buyer reliably does. For an agent whose entire
+        #    job is booking demos, completing qualification and then
+        #    never asking for the meeting is the most expensive failure
+        #    available -- so nothing left to qualify IS the close.
+        if (
+            stage == ConversationStage.CLOSING
+            or not missing_fields
+            or (temperature == self.HOT_TEMPERATURE and len(missing_fields) <= 1)
         ):
             return self._plan_closing(goal_value, temperature, score, missing_fields)
 

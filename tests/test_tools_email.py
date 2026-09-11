@@ -163,6 +163,34 @@ class TestPlanningEngineRequestsTheToolDeterministically(unittest.TestCase):
         plan = self._closing_plan(["send_overview_email"], email="")
         self.assertIsNone(plan.tool_request)
 
+    def test_a_fully_qualified_lead_closes_even_without_urgency_language(self):
+        """
+        The five fields kaivix's qualification.yaml asks for are worth
+        at most 65 in LeadIntelligenceEngine and HOT starts at 75, so
+        before this the temperature test was structurally unreachable
+        from qualification alone: a perfectly qualified buyer who never
+        happened to say "urgent" stayed Warm and Bray never asked for
+        the meeting.
+        """
+        engine = PlanningEngine(business_config=_config(["send_overview_email"]))
+        lead = SimpleNamespace(
+            email="nadia@ridgeline.com",
+            temperature="Warm",
+            score=65,
+            objections=[],
+            buying_signals=[],
+        )
+
+        plan = engine.plan(
+            stage="discovery",
+            intent="question",
+            goal="qualify",
+            lead=lead,
+            qualification={"missing": [], "qualified": True},
+        )
+
+        self.assertEqual(plan.strategy, "drive_to_booking")
+
     def test_no_request_while_still_qualifying(self):
         """
         The trigger is the closing moment specifically, not "any turn
